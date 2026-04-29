@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.3
+// @version      1.10.4
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -221,6 +221,29 @@
     return { high: highStatKey, secondary: secondary, tert1: tert1, tert2: dump };
   }
 
+  // True if the ratio explicitly says NOT to train this stat — covers:
+  //   1. ratio declares forcedDump = key (Aec3 → 'dex')
+  //   2. the ratio multiplier for this stat's role is 0 (Hank's tert2; or
+  //      any Custom ratio that zeroes out 1+ stats — even 2 of them, which
+  //      lets us support "only train 2 stats" builds without a code change).
+  // Use at every site that decides whether to skip a stat from rep
+  // allocation or grading. Replaces the previous hardcoded
+  // `ratioKey === 'hank' && roles.tert2 === key` check.
+  function isStatDumped(key, ratioKey, roles) {
+    const conf = RATIOS[ratioKey];
+    if (!conf) return false;
+    if (conf.forcedDump === key) return true;
+    // Find this stat's role and check the ratio's multiplier for that role.
+    for (const role of Object.keys(roles)) {
+      if (roles[role] !== key) continue;
+      const mults = conf.multipliers || {};
+      const mult = mults[role];
+      if (typeof mult === 'number' && mult === 0) return true;
+      break;
+    }
+    return false;
+  }
+
   function escapeHtml(text) {
     return String(text)
       .replace(/&/g, '&amp;')
@@ -322,7 +345,7 @@
   function overallGrade(stats, targets, roles, ratioKey) {
     let totalPct = 0; let count = 0;
     for (const [key] of Object.entries(STAT_LABELS)) {
-      const isDump = ratioKey === 'hank' && roles.tert2 === key;
+      const isDump = isStatDumped(key, ratioKey, roles);
       if (isDump || !targets[key]) continue;
       const actual = stats[key] || 0;
       totalPct += Math.min(actual / targets[key], 1.0);
@@ -910,7 +933,7 @@
       let worst = null, worstPct = Infinity;
       for (const k of Object.keys(STAT_LABELS)) {
         if (!targets[k]) continue;
-        const isDump = ratioKey === 'hank' && roles.tert2 === k;
+        const isDump = isStatDumped(k, ratioKey, roles);
         if (isDump) continue;
         if (!bestGym[k]) continue;
         if (bestGym[k].cost > energyLeft) continue;
@@ -931,7 +954,7 @@
     const prevTargets = computeTargets(prev, selectedRatio, highStat);
     const warnings = [];
     for (const [key] of Object.entries(STAT_LABELS)) {
-      const isDump = selectedRatio === 'hank' && roles.tert2 === key;
+      const isDump = isStatDumped(key, selectedRatio, roles);
       if (isDump || !targets[key] || !prevTargets[key]) continue;
       const currPct = (stats[key] || 0) / targets[key];
       const prevPct = (prev[key] || 0) / prevTargets[key];
@@ -956,7 +979,7 @@
       ...Object.entries(STAT_LABELS).map(([key, label]) => {
         const actual = stats[key] || 0;
         const target = targets[key] || 0;
-        const isDump = selectedRatio === 'hank' && roles.tert2 === key;
+        const isDump = isStatDumped(key, selectedRatio, roles);
         const status = getStatus(actual, target, isDump);
         return `${pad(label,12)} ${pad(fmtNum(actual),12)} ${pad(isDump?'minimize':fmtNum(Math.round(target)),12)} ${status.label}`;
       }),
@@ -969,7 +992,7 @@
     const rec = (() => {
       let worst = null; let worstScore = Infinity;
       for (const [key] of Object.entries(STAT_LABELS)) {
-        const isDump = selectedRatio === 'hank' && roles.tert2 === key;
+        const isDump = isStatDumped(key, selectedRatio, roles);
         if (isDump || !targets[key]) continue;
         const actual = stats[key] || 0;
         const score = actual / targets[key];
@@ -987,7 +1010,7 @@
     const statRows = Object.entries(STAT_LABELS).map(([key, label]) => {
       const actual  = stats[key] || 0;
       const target  = targets[key] || 0;
-      const isDump  = selectedRatio === 'hank' && roles.tert2 === key;
+      const isDump  = isStatDumped(key, selectedRatio, roles);
       const isHigh  = roles.high === key;
       const is2nd   = roles.secondary === key;
       const is3rd   = roles.tert1 === key;
