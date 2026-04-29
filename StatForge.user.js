@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.2
+// @version      1.10.3
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -73,6 +73,11 @@
   };
 
   const STAT_LABELS  = { str: 'Strength', spd: 'Speed', def: 'Defense', dex: 'Dexterity' };
+
+  // True while executeTrainStepAsync is mid-step. Rapid clicks on the train
+  // button while this is set are ignored — Torn's UI hasn't reached the
+  // expected post-click state yet, so processing another click would race.
+  let trainStepInFlight = false;
   const STAT_COLORS  = { str: '#f97316', spd: '#22d3ee', def: '#a78bfa', dex: '#4ade80' };
 
   // Gym dots per stat, keyed by Torn gym id.
@@ -710,14 +715,45 @@
     return 'Train ' + statLabel;
   }
 
-  // Execute exactly one DOM click based on current state. Synchronous.
-  function executeTrainStep(statKey, stats) {
+  // Resolves true the first time `predicate()` returns truthy after any DOM
+  // mutation under <body>, or false on timeout. Same shape as TSA's
+  // qtWaitForCondition — used to wait for Torn's UI to reach a stable state
+  // after a click, so spamming the train button can't race the transition.
+  function sfWaitForCondition(predicate, maxMs) {
+    return new Promise((resolve) => {
+      let done = false;
+      let t;
+      let obs;
+      const finish = (val) => {
+        if (done) return;
+        done = true;
+        try { if (obs) obs.disconnect(); } catch(e) {}
+        try { clearTimeout(t); } catch(e) {}
+        resolve(val);
+      };
+      try { if (predicate()) return finish(true); } catch(e) {}
+      obs = new MutationObserver(() => {
+        try { if (predicate()) finish(true); } catch(e) {}
+      });
+      obs.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+      t = setTimeout(() => finish(false), maxMs);
+    });
+  }
+
+  // Execute exactly one DOM click based on current state, then wait for
+  // Torn's UI to settle into the expected next state before resolving.
+  // Async so the click handler can serialise rapid clicks behind a single
+  // in-flight lock (no races during gym/train transitions).
+  async function executeTrainStepAsync(statKey, stats) {
     const step = nextTrainStep(statKey, stats);
 
     if (step.action === 'confirm') {
       const btn = findTornSwitchConfirmButton();
       if (!btn) return { ok: false, reason: 'confirm-not-found' };
       btn.click();
+      // Ready when the membership-confirm button is gone — Torn has accepted
+      // the switch and re-rendered the gym/stat layout.
+      await sfWaitForCondition(() => !findTornSwitchConfirmButton(), 3000);
       return { ok: true, labelAfter: step.labelAfter };
     }
 
@@ -725,6 +761,13 @@
       const tile = findTornGymTile(step.target);
       if (!tile) return { ok: false, reason: 'tile-not-found' };
       tile.click();
+      // Ready when EITHER the membership-confirm button shows up (paid switch
+      // requiring activation) OR the active gym tile already changed (free
+      // switch — no confirmation needed).
+      await sfWaitForCondition(() => {
+        if (findTornSwitchConfirmButton()) return true;
+        return getActiveGymId() === step.target;
+      }, 3000);
       return { ok: true, labelAfter: step.labelAfter };
     }
 
@@ -734,12 +777,29 @@
       if (!input) return { ok: false, reason: 'counter-not-found' };
       if (input.disabled) return { ok: false, reason: 'counter-disabled' };
       setInputValueReactSafe(input, step.reps);
+      // React-safe setter is normally synchronous, but give it a short grace
+      // window to commit the value into the rendered DOM.
+      await sfWaitForCondition(() => {
+        const v = (input.value || '').replace(/,/g, '');
+        return v === String(step.reps);
+      }, 500);
       return { ok: true, labelAfter: step.labelAfter };
     }
 
     const trainBtn = findTornTrainButton(statKey);
     if (!trainBtn) return { ok: false, reason: 'train-not-found' };
+    // Snapshot energy BEFORE clicking so we can detect Torn deducting it.
+    const beforeEnergy = readPageEnergy();
     trainBtn.click();
+    // Ready when the train button is re-enabled (Torn's UI re-rendered with
+    // fresh energy/state) OR the energy reading dropped — either signals the
+    // train cycle has been processed.
+    await sfWaitForCondition(() => {
+      const fresh = findTornTrainButton(statKey);
+      if (fresh && !fresh.disabled) return true;
+      const after = readPageEnergy();
+      return !!(beforeEnergy && after && after.current < beforeEnergy.current);
+    }, 3000);
     return { ok: true, labelAfter: step.labelAfter };
   }
 
@@ -1419,23 +1479,32 @@
       if (id === 'trh-train-now') {
         const stat = btn.dataset.trhStat;
         if (!stat) return;
-        const res = executeTrainStep(stat, stats);
-        if (res.ok) {
-          btn.textContent = res.labelAfter;
-        } else {
-          const msg = {
-            'confirm-not-found': 'Confirm button not found',
-            'tile-not-found': 'Gym tile not visible',
-            'train-not-found': 'Train button not found',
-            'counter-not-found': 'Rep counter not found',
-            'counter-disabled': 'Counter is disabled at this gym',
-          }[res.reason] || 'Not ready - try again';
-          const original = btn.textContent;
-          btn.textContent = msg;
-          setTimeout(() => {
-            if (document.getElementById('trh-train-now') === btn) btn.textContent = original;
-          }, 1500);
-        }
+        // Drop spam clicks while Torn's UI is mid-transition. The async step
+        // runner waits for the expected post-click DOM state before clearing
+        // the lock — so clicking faster than Torn can render simply pauses
+        // until the previous step completes.
+        if (trainStepInFlight) return;
+        trainStepInFlight = true;
+        executeTrainStepAsync(stat, stats).then((res) => {
+          trainStepInFlight = false;
+          if (document.getElementById('trh-train-now') !== btn) return;
+          if (res.ok) {
+            btn.textContent = res.labelAfter;
+          } else {
+            const msg = {
+              'confirm-not-found': 'Confirm button not found',
+              'tile-not-found': 'Gym tile not visible',
+              'train-not-found': 'Train button not found',
+              'counter-not-found': 'Rep counter not found',
+              'counter-disabled': 'Counter is disabled at this gym',
+            }[res.reason] || 'Not ready - try again';
+            const original = btn.textContent;
+            btn.textContent = msg;
+            setTimeout(() => {
+              if (document.getElementById('trh-train-now') === btn) btn.textContent = original;
+            }, 1500);
+          }
+        }).catch(() => { trainStepInFlight = false; });
         return;
       }
 
