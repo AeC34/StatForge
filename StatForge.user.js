@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.4
+// @version      1.10.5
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -221,19 +221,23 @@
     return { high: highStatKey, secondary: secondary, tert1: tert1, tert2: dump };
   }
 
-  // True if the ratio explicitly says NOT to train this stat — covers:
-  //   1. ratio declares forcedDump = key (Aec3 → 'dex')
-  //   2. the ratio multiplier for this stat's role is 0 (Hank's tert2; or
-  //      any Custom ratio that zeroes out 1+ stats — even 2 of them, which
-  //      lets us support "only train 2 stats" builds without a code change).
+  // True if the ratio explicitly says NOT to train this stat — i.e. the
+  // ratio's multiplier for whichever role `key` occupies is exactly 0.
+  // This is what makes Hank's tert2-zero behave as a hard dump (DEX skipped
+  // entirely) while Aec3's 0.1351 multiplier is honoured as a real target
+  // (DEX trained up to 13.51% of high). Custom ratios that zero out 1, 2,
+  // or even 3 slots get the same treatment for free — supporting 2- and
+  // 3-stat training plans declaratively.
+  //
+  // Note: ratio.forcedDump is intentionally NOT consulted here. It's the
+  // recommended default for the user's dump-stat picker (UI hint), not a
+  // signal that the stat should be skipped — the multiplier drives skipping.
   // Use at every site that decides whether to skip a stat from rep
   // allocation or grading. Replaces the previous hardcoded
   // `ratioKey === 'hank' && roles.tert2 === key` check.
   function isStatDumped(key, ratioKey, roles) {
     const conf = RATIOS[ratioKey];
     if (!conf) return false;
-    if (conf.forcedDump === key) return true;
-    // Find this stat's role and check the ratio's multiplier for that role.
     for (const role of Object.keys(roles)) {
       if (roles[role] !== key) continue;
       const mults = conf.multipliers || {};
