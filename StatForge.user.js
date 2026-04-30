@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.5
+// @version      1.10.6
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -1550,7 +1550,7 @@
       }
 
       if (id === 'trh-clear-history') {
-        let confirmed = false;
+        let confirmed;
         try { confirmed = confirm('Clear all stat history?'); } catch(e) { confirmed = true; }
         if (confirmed) {
           history = [];
