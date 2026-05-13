@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.7
+// @version      1.10.8
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -1604,6 +1604,14 @@
 
   // Init
 
+  // Active-viewing gate per Torn rule clarification 2026-05-13: scripts may
+  // only read from / interact with pages the user is actively viewing
+  // (foreground tab + focused window). Background tabs and unfocused
+  // windows must be inert.
+  function isActivelyViewed() {
+    return document.visibilityState === 'visible' && document.hasFocus();
+  }
+
   function isGymPage() {
     return location.pathname === '/gym.php' || location.href.includes('gym.php');
   }
@@ -1615,6 +1623,7 @@
 
   function waitAndInject(attempts = 0) {
     if (!isGymPage()) { removePanel(); return; }
+    if (!isActivelyViewed()) return;
 
     const domReady = document.querySelector('.gym-content, .content-title, #gym-root, .stats-info, main');
     if (!domReady && attempts < 40) {
@@ -1633,7 +1642,7 @@
   }
 
   function backgroundStatWatch() {
-    if (!isGymPage() || !document.getElementById('trh-wrapper')) return;
+    if (!isGymPage() || !isActivelyViewed() || !document.getElementById('trh-wrapper')) return;
     const warningVisible = document.querySelector('#trh-wrapper .trh-warn');
     if (!warningVisible) return;
     const stats = readStatsFromPage();
@@ -1674,6 +1683,7 @@
   }
 
   function syncEnergyBaseline() {
+    if (!isActivelyViewed()) return;
     const e = getDisplayedEnergy();
     if (e !== null) lastEnergyValue = e;
   }
@@ -1683,7 +1693,7 @@
     syncEnergyBaseline();
 
     trainObserver = new MutationObserver(() => {
-      if (!isGymPage() || observerPaused) return;
+      if (!isGymPage() || !isActivelyViewed() || observerPaused) return;
       const currentEnergy = getDisplayedEnergy();
       if (currentEnergy === null) return;
 
@@ -1724,5 +1734,13 @@
     waitAndInject();
     startTrainObserver();
   }
+
+  function resumeIfActive() {
+    if (!isActivelyViewed() || !isGymPage()) return;
+    syncEnergyBaseline();
+    if (!document.getElementById('trh-wrapper')) waitAndInject();
+  }
+  document.addEventListener('visibilitychange', resumeIfActive);
+  window.addEventListener('focus', resumeIfActive);
 
 })();
