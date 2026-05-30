@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.8
+// @version      1.10.9
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -168,6 +168,15 @@
   function fmtNum(n) {
     if (n === null || n === undefined || isNaN(n)) return '???';
     return Math.round(n).toLocaleString();
+  }
+
+  function fmtShort(n) {
+    if (n === null || n === undefined || isNaN(n)) return '???';
+    const r = Math.round(n);
+    const abs = Math.abs(r);
+    if (abs >= 1e6) return (r / 1e6).toFixed(1) + 'M';
+    if (abs >= 1e3) return Math.round(r / 1e3) + 'K';
+    return String(r);
   }
 
   function fmtDate(ts) {
@@ -1183,13 +1192,13 @@
           ${Object.keys(STAT_LABELS).map(k => {
             const delta = prev ? (entry[k]||0) - (prev[k]||0) : null;
             return `<div class="trh-history-stat" style="color:${STAT_COLORS[k]}">
-              ${fmtNum(entry[k])}
-              ${delta !== null && delta !== 0 ? `<div class="trh-history-delta" style="color:${delta>0?'#4ade80':'#f87171'}">${delta>0?'+':''}${fmtNum(delta)}</div>` : ''}
+              ${fmtShort(entry[k])}
+              ${delta !== null && delta !== 0 ? `<div class="trh-history-delta" style="color:${delta>0?'#4ade80':'#f87171'}">${delta>0?'+':''}${fmtShort(delta)}</div>` : ''}
             </div>`;
           }).join('')}
           <div class="trh-history-stat" style="color:#74c0fc">
-            ${fmtNum(tbs)}
-            ${tbsDelta !== null && tbsDelta !== 0 ? `<div class="trh-history-delta" style="color:${tbsDelta>0?'#4ade80':'#f87171'}">${tbsDelta>0?'+':''}${fmtNum(tbsDelta)}</div>` : ''}
+            ${fmtShort(tbs)}
+            ${tbsDelta !== null && tbsDelta !== 0 ? `<div class="trh-history-delta" style="color:${tbsDelta>0?'#4ade80':'#f87171'}">${tbsDelta>0?'+':''}${fmtShort(tbsDelta)}</div>` : ''}
           </div>
         </div>`;
     }).join('');
