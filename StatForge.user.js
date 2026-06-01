@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.9
+// @version      1.10.10
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/gym.php*
@@ -119,8 +119,8 @@
     33: { str: 3.4, spd: 3.4, def: 4.6, dex: 0   },
   };
 
-  // Gym id -> display name. Verified against gym.php DOM dumps
-  // (see TORN_DOM.md). Id 32 ships as "Unknown" in Torn's UI - kept
+  // Gym id -> display name. Verified against gym.php DOM dumps.
+  // Id 32 ships as "Unknown" in Torn's UI - kept
   // as null here so the script falls back to "Gym #32".
   const GYM_NAMES = {
     1:  "Premier Fitness",
@@ -533,7 +533,7 @@
   // Feature helpers
 
   // Currently active gym id, read from Torn's DOM.
-  // Verified structure (TORN_DOM.md): each gym tile is
+  // Verified structure against gym.php DOM dump: each gym tile is
   //   <button class="gymButton___... active___...">   when active
   // Tiles are in DOM order matching gym id (tile[0] = id 1, tile[31] = id 32).
   function getActiveGymId() {
@@ -548,7 +548,7 @@
 
   // Set of gym ids the user currently has unlocked (parent tile lacks a "locked*" class)
   // Set of gym ids the user can currently train at.
-  // Verified (TORN_DOM.md): each tile carries state classes -
+  // Verified against gym.php DOM dump: each tile carries state classes -
   //   locked___          = membership not purchased
   //   lockedPurchased___ = paid for, but stat ratio below requirement
   //   (neither)          = usable
@@ -581,7 +581,7 @@
   }
 
   // The gym tile element for a given id.
-  // Verified (TORN_DOM.md): tiles render as <button class="gymButton___...">
+  // Verified against gym.php DOM dump: tiles render as <button class="gymButton___...">
   // in DOM order matching gym id 1..32, so tile at index (id - 1) is
   // the right one. Returns null when the page hasn't rendered tiles yet
   // or the id is out of range.
@@ -590,7 +590,7 @@
     return tiles[gymId - 1] || null;
   }
 
-  // Torn's Train-<stat> button. Verified shape (TORN_DOM.md):
+  // Torn's Train-<stat> button. Verified shape against gym.php DOM dump:
   //   <button class="torn-btn" aria-label="Train strength">TRAIN</button>
   // All four buttons share the same visible "TRAIN" text; the stat
   // name only appears in aria-label. Pass 1 matches on aria-label
