@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.11.3
+// @version      1.11.4
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown indicator shown in the sidebar status-icons row on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -1769,6 +1769,22 @@
   // Render the indicator as the first item in the sidebar status-icons row
   // (verified dump): <ul class="status-icons___ big___"><li class="iconNN___">…
   // Class hashes rotate, so match the stable `status-icons___` prefix.
+  // Torn styles every status-icons <li> as a fixed-size icon with a background
+  // sprite/colour; our text <li> would otherwise inherit that (a green sprite
+  // corner showing behind the pill). Neutralise it for our own id only.
+  function injectDrugBadgeStyle() {
+    if (document.getElementById('sf-drug-badge-style')) return;
+    const s = document.createElement('style');
+    s.id = 'sf-drug-badge-style';
+    s.textContent =
+      '#sf-drug-badge{background:none!important;background-image:none!important;' +
+      'width:auto!important;min-width:0!important;height:auto!important;' +
+      'min-height:0!important;padding:0!important;box-shadow:none!important;}' +
+      '#sf-drug-badge::before,#sf-drug-badge::after{content:none!important;' +
+      'display:none!important;background:none!important;}';
+    (document.head || document.documentElement).appendChild(s);
+  }
+
   function ensureDrugBadge() {
     const list = document.querySelector('ul[class*="status-icons___"]');
     if (!list) return null; // sidebar not rendered yet — retried by the 1s tick
@@ -1877,6 +1893,7 @@
 
   function initDrugCooldown() {
     if (!document.body) { setTimeout(initDrugCooldown, 300); return; }
+    injectDrugBadgeStyle();
     ensureDrugBadge();
     renderDrugBadge();
     fetchDrugCooldown();
