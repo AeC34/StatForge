@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.11.0
-// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown badge shown on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
+// @version      1.11.1
+// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown indicator shown next to the sidebar Energy bar on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
 // @grant        None
@@ -1744,10 +1744,11 @@
     startTrainObserver();
   }
 
-  // ---- Drug cooldown badge (all Torn pages, Torn-API driven) ----
+  // ---- Drug cooldown indicator (all Torn pages, Torn-API driven) ----
   // Reads cooldowns from api.torn.com only — never scrapes the page. Polls
   // only while the tab is actively viewed (foreground + focused), per Torn
-  // rules, and shows a live local countdown between polls.
+  // rules, and shows a live local countdown between polls. Rendered inline
+  // in the sidebar Energy bar, right after the "current/max" value.
   const DRUG_POLL_MS = 60000;
   let drugApiKey      = store.get('trh_api_key', '');
   let drugCooldownSec = null;   // last fetched remaining seconds (drug)
@@ -1764,18 +1765,41 @@
     return s + 's';
   }
 
+  // Locate the sidebar Energy bar's value element. Structure (verified dump):
+  //   <div class="bar-stats___">
+  //     <p class="bar-name___">Energy:</p>
+  //     <p class="bar-value___">15/150</p>
+  //     <p class="bar-descr___">07:02</p>
+  //   </div>
+  // Class hashes rotate, so match on the stable `bar-*___` prefixes and pick
+  // the row whose name reads "Energy" (Nerve/Happy/Life share the structure).
+  function findEnergyValueEl() {
+    const names = document.querySelectorAll('[class*="bar-name___"]');
+    for (const n of names) {
+      if (/energy/i.test(n.textContent || '')) {
+        const row = n.parentElement;
+        const value = row && row.querySelector('[class*="bar-value___"]');
+        if (value) return value;
+      }
+    }
+    return null;
+  }
+
   function ensureDrugBadge() {
+    const valueEl = findEnergyValueEl();
+    if (!valueEl) return null; // sidebar not rendered yet — retried by the 1s tick
     let el = document.getElementById('sf-drug-badge');
-    if (!el && document.body) {
-      el = document.createElement('div');
+    if (!el) {
+      el = document.createElement('span');
       el.id = 'sf-drug-badge';
-      el.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:2147483000;' +
-        'font:600 12px/1.2 Arial,Helvetica,sans-serif;padding:6px 10px;border-radius:6px;' +
-        'cursor:pointer;color:#fff;background:#2b2b2b;box-shadow:0 2px 6px rgba(0,0,0,.4);' +
-        'user-select:none;';
+      el.style.cssText = 'margin-left:6px;font-weight:700;cursor:pointer;white-space:nowrap;';
       el.title = 'StatForge drug cooldown — click to set/change your Torn API key';
       el.addEventListener('click', promptDrugApiKey);
-      document.body.appendChild(el);
+    }
+    // (Re)insert right after the Energy value if missing or moved (Torn
+    // re-renders the sidebar on navigation, detaching our element).
+    if (el.parentElement !== valueEl.parentElement || el.previousElementSibling !== valueEl) {
+      valueEl.insertAdjacentElement('afterend', el);
     }
     return el;
   }
@@ -1784,27 +1808,27 @@
     const el = ensureDrugBadge();
     if (!el) return;
     if (!drugApiKey) {
-      el.textContent = '💊 Set API key';
-      el.style.background = '#555';
+      el.textContent = '💊 set key';
+      el.style.color = '#9e9e9e';
       return;
     }
     if (drugLastError) {
       el.textContent = '💊 ' + drugLastError;
-      el.style.background = '#7a2e2e';
+      el.style.color = '#ef5350';
       return;
     }
     if (drugCooldownSec === null) {
       el.textContent = '💊 …';
-      el.style.background = '#2b2b2b';
+      el.style.color = '#9e9e9e';
       return;
     }
     const remaining = drugCooldownSec - Math.floor((Date.now() - drugFetchAt) / 1000);
     if (remaining <= 0) {
-      el.textContent = '💊 Drug ready';
-      el.style.background = '#2e7d32';
+      el.textContent = '💊 ready';
+      el.style.color = '#66bb6a';
     } else {
       el.textContent = '💊 ' + fmtCooldown(remaining);
-      el.style.background = '#b26a00';
+      el.style.color = '#ffb74d';
     }
   }
 
