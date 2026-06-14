@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.11.1
-// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown indicator shown next to the sidebar Energy bar on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
+// @version      1.11.3
+// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown indicator shown in the sidebar status-icons row on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
 // @grant        None
@@ -1747,13 +1747,14 @@
   // ---- Drug cooldown indicator (all Torn pages, Torn-API driven) ----
   // Reads cooldowns from api.torn.com only — never scrapes the page. Polls
   // only while the tab is actively viewed (foreground + focused), per Torn
-  // rules, and shows a live local countdown between polls. Rendered inline
-  // in the sidebar Energy bar, right after the "current/max" value.
+  // rules, and shows a live local countdown between polls. Rendered as the
+  // first item in the sidebar status-icons row at the top of the sidebar.
   const DRUG_POLL_MS = 60000;
   let drugApiKey      = store.get('trh_api_key', '');
   let drugCooldownSec = null;   // last fetched remaining seconds (drug)
   let drugFetchAt     = 0;      // Date.now() when last fetched
   let drugLastError   = null;   // short error label, or null
+  let drugBadKeyHandled = false; // true once we've auto-prompted for a bad key
 
   function fmtCooldown(sec) {
     sec = Math.max(0, Math.floor(sec));
@@ -1765,43 +1766,36 @@
     return s + 's';
   }
 
-  // Locate the sidebar Energy bar's value element. Structure (verified dump):
-  //   <div class="bar-stats___">
-  //     <p class="bar-name___">Energy:</p>
-  //     <p class="bar-value___">15/150</p>
-  //     <p class="bar-descr___">07:02</p>
-  //   </div>
-  // Class hashes rotate, so match on the stable `bar-*___` prefixes and pick
-  // the row whose name reads "Energy" (Nerve/Happy/Life share the structure).
-  function findEnergyValueEl() {
-    const names = document.querySelectorAll('[class*="bar-name___"]');
-    for (const n of names) {
-      if (/energy/i.test(n.textContent || '')) {
-        const row = n.parentElement;
-        const value = row && row.querySelector('[class*="bar-value___"]');
-        if (value) return value;
-      }
-    }
-    return null;
-  }
-
+  // Render the indicator as the first item in the sidebar status-icons row
+  // (verified dump): <ul class="status-icons___ big___"><li class="iconNN___">…
+  // Class hashes rotate, so match the stable `status-icons___` prefix.
   function ensureDrugBadge() {
-    const valueEl = findEnergyValueEl();
-    if (!valueEl) return null; // sidebar not rendered yet — retried by the 1s tick
+    const list = document.querySelector('ul[class*="status-icons___"]');
+    if (!list) return null; // sidebar not rendered yet — retried by the 1s tick
     let el = document.getElementById('sf-drug-badge');
     if (!el) {
-      el = document.createElement('span');
+      el = document.createElement('li');
       el.id = 'sf-drug-badge';
-      el.style.cssText = 'margin-left:6px;font-weight:700;cursor:pointer;white-space:nowrap;';
-      el.title = 'StatForge drug cooldown — click to set/change your Torn API key';
-      el.addEventListener('click', promptDrugApiKey);
+      el.style.cssText = 'list-style:none;display:flex;align-items:center;' +
+        'margin-right:8px;font-weight:700;cursor:pointer;white-space:nowrap;';
+      el.addEventListener('click', onDrugBadgeClick);
     }
-    // (Re)insert right after the Energy value if missing or moved (Torn
-    // re-renders the sidebar on navigation, detaching our element).
-    if (el.parentElement !== valueEl.parentElement || el.previousElementSibling !== valueEl) {
-      valueEl.insertAdjacentElement('afterend', el);
+    // (Re)insert as the first list item if missing or moved (Torn re-renders
+    // the sidebar on navigation, detaching our element).
+    if (el.parentElement !== list || list.firstElementChild !== el) {
+      list.insertBefore(el, list.firstChild);
     }
     return el;
+  }
+
+  // Click: with a working key, jump to the Items page (to take a drug);
+  // otherwise (no key / key error) open the key prompt so it can be fixed.
+  function onDrugBadgeClick() {
+    if (drugApiKey && !drugLastError) {
+      window.location.href = 'https://www.torn.com/item.php';
+    } else {
+      promptDrugApiKey();
+    }
   }
 
   function renderDrugBadge() {
@@ -1810,13 +1804,16 @@
     if (!drugApiKey) {
       el.textContent = '💊 set key';
       el.style.color = '#9e9e9e';
+      el.title = 'StatForge — click to set your Torn API key';
       return;
     }
     if (drugLastError) {
       el.textContent = '💊 ' + drugLastError;
       el.style.color = '#ef5350';
+      el.title = 'StatForge — API key problem; click to re-enter it';
       return;
     }
+    el.title = 'StatForge drug cooldown — click to open Items';
     if (drugCooldownSec === null) {
       el.textContent = '💊 …';
       el.style.color = '#9e9e9e';
@@ -1840,6 +1837,7 @@
     drugApiKey = v.trim();
     store.set('trh_api_key', drugApiKey);
     drugLastError = null;
+    drugBadKeyHandled = false; // a freshly entered bad key may re-prompt
     drugCooldownSec = null;
     renderDrugBadge();
     fetchDrugCooldown();
@@ -1852,9 +1850,21 @@
       .then(r => r.json())
       .then(data => {
         if (data && data.error) {
-          drugLastError = data.error.code === 2 ? 'Bad key' : 'API error';
-        } else if (data && data.cooldowns && typeof data.cooldowns.drug === 'number') {
+          const badKey = data.error.code === 2; // 2 = incorrect key
+          drugLastError = badKey ? 'Bad key' : 'API error';
+          renderDrugBadge();
+          // An invalid key never recovers on its own — prompt once to re-enter
+          // it (guarded so we don't nag on every 60s poll). fetch only runs
+          // while actively viewed, so the prompt never fires in a background tab.
+          if (badKey && !drugBadKeyHandled) {
+            drugBadKeyHandled = true;
+            promptDrugApiKey();
+          }
+          return;
+        }
+        if (data && data.cooldowns && typeof data.cooldowns.drug === 'number') {
           drugLastError = null;
+          drugBadKeyHandled = false;
           drugCooldownSec = data.cooldowns.drug;
           drugFetchAt = Date.now();
         } else {
