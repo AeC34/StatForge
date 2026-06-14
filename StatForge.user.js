@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.10.10
-// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
+// @version      1.11.0
+// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown badge shown on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
-// @match        https://www.torn.com/gym.php*
+// @match        https://www.torn.com/*
 // @grant        None
 // @license      MIT
 // @run-at       document-end
@@ -1743,6 +1743,115 @@
     waitAndInject();
     startTrainObserver();
   }
+
+  // ---- Drug cooldown badge (all Torn pages, Torn-API driven) ----
+  // Reads cooldowns from api.torn.com only — never scrapes the page. Polls
+  // only while the tab is actively viewed (foreground + focused), per Torn
+  // rules, and shows a live local countdown between polls.
+  const DRUG_POLL_MS = 60000;
+  let drugApiKey      = store.get('trh_api_key', '');
+  let drugCooldownSec = null;   // last fetched remaining seconds (drug)
+  let drugFetchAt     = 0;      // Date.now() when last fetched
+  let drugLastError   = null;   // short error label, or null
+
+  function fmtCooldown(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+
+  function ensureDrugBadge() {
+    let el = document.getElementById('sf-drug-badge');
+    if (!el && document.body) {
+      el = document.createElement('div');
+      el.id = 'sf-drug-badge';
+      el.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:2147483000;' +
+        'font:600 12px/1.2 Arial,Helvetica,sans-serif;padding:6px 10px;border-radius:6px;' +
+        'cursor:pointer;color:#fff;background:#2b2b2b;box-shadow:0 2px 6px rgba(0,0,0,.4);' +
+        'user-select:none;';
+      el.title = 'StatForge drug cooldown — click to set/change your Torn API key';
+      el.addEventListener('click', promptDrugApiKey);
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
+  function renderDrugBadge() {
+    const el = ensureDrugBadge();
+    if (!el) return;
+    if (!drugApiKey) {
+      el.textContent = '💊 Set API key';
+      el.style.background = '#555';
+      return;
+    }
+    if (drugLastError) {
+      el.textContent = '💊 ' + drugLastError;
+      el.style.background = '#7a2e2e';
+      return;
+    }
+    if (drugCooldownSec === null) {
+      el.textContent = '💊 …';
+      el.style.background = '#2b2b2b';
+      return;
+    }
+    const remaining = drugCooldownSec - Math.floor((Date.now() - drugFetchAt) / 1000);
+    if (remaining <= 0) {
+      el.textContent = '💊 Drug ready';
+      el.style.background = '#2e7d32';
+    } else {
+      el.textContent = '💊 ' + fmtCooldown(remaining);
+      el.style.background = '#b26a00';
+    }
+  }
+
+  function promptDrugApiKey() {
+    const v = window.prompt(
+      'Enter your Torn API key (needs "cooldowns" access). Stored locally in your browser only.',
+      drugApiKey || '');
+    if (v === null) return; // cancelled
+    drugApiKey = v.trim();
+    store.set('trh_api_key', drugApiKey);
+    drugLastError = null;
+    drugCooldownSec = null;
+    renderDrugBadge();
+    fetchDrugCooldown();
+  }
+
+  function fetchDrugCooldown() {
+    if (!drugApiKey || !isActivelyViewed()) return;
+    fetch('https://api.torn.com/user/?selections=cooldowns&key=' +
+          encodeURIComponent(drugApiKey) + '&comment=StatForge')
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.error) {
+          drugLastError = data.error.code === 2 ? 'Bad key' : 'API error';
+        } else if (data && data.cooldowns && typeof data.cooldowns.drug === 'number') {
+          drugLastError = null;
+          drugCooldownSec = data.cooldowns.drug;
+          drugFetchAt = Date.now();
+        } else {
+          drugLastError = 'API error';
+        }
+        renderDrugBadge();
+      })
+      .catch(() => { drugLastError = 'Net error'; renderDrugBadge(); });
+  }
+
+  function initDrugCooldown() {
+    if (!document.body) { setTimeout(initDrugCooldown, 300); return; }
+    ensureDrugBadge();
+    renderDrugBadge();
+    fetchDrugCooldown();
+    setInterval(() => { if (isActivelyViewed()) fetchDrugCooldown(); }, DRUG_POLL_MS);
+    setInterval(renderDrugBadge, 1000); // live local countdown + self-heal badge
+    document.addEventListener('visibilitychange', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
+    window.addEventListener('focus', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
+  }
+  initDrugCooldown();
 
   function resumeIfActive() {
     if (!isActivelyViewed() || !isGymPage()) return;
