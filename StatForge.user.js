@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.11.4
-// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a drug-cooldown indicator shown in the sidebar status-icons row on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
+// @version      1.11.6
+// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
 // @grant        None
@@ -1744,11 +1744,12 @@
     startTrainObserver();
   }
 
-  // ---- Drug cooldown indicator (all Torn pages, Torn-API driven) ----
+  // ---- Drug cooldown alarm (all Torn pages, Torn-API driven) ----
   // Reads cooldowns from api.torn.com only — never scrapes the page. Polls
   // only while the tab is actively viewed (foreground + focused), per Torn
-  // rules, and shows a live local countdown between polls. Rendered as the
-  // first item in the sidebar status-icons row at the top of the sidebar.
+  // rules, with a live local countdown between polls. Rendered as a fully
+  // self-contained styled floating pill (own id + namespaced classes), so no
+  // Torn styling can bleed into it.
   const DRUG_POLL_MS = 60000;
   let drugApiKey      = store.get('trh_api_key', '');
   let drugCooldownSec = null;   // last fetched remaining seconds (drug)
@@ -1766,47 +1767,49 @@
     return s + 's';
   }
 
-  // Render the indicator as the first item in the sidebar status-icons row
-  // (verified dump): <ul class="status-icons___ big___"><li class="iconNN___">…
-  // Class hashes rotate, so match the stable `status-icons___` prefix.
-  // Torn styles every status-icons <li> as a fixed-size icon with a background
-  // sprite/colour; our text <li> would otherwise inherit that (a green sprite
-  // corner showing behind the pill). Neutralise it for our own id only.
-  function injectDrugBadgeStyle() {
-    if (document.getElementById('sf-drug-badge-style')) return;
+  function injectDrugAlarmStyle() {
+    if (document.getElementById('sf-drug-alarm-style')) return;
     const s = document.createElement('style');
-    s.id = 'sf-drug-badge-style';
+    s.id = 'sf-drug-alarm-style';
     s.textContent =
-      '#sf-drug-badge{background:none!important;background-image:none!important;' +
-      'width:auto!important;min-width:0!important;height:auto!important;' +
-      'min-height:0!important;padding:0!important;box-shadow:none!important;}' +
-      '#sf-drug-badge::before,#sf-drug-badge::after{content:none!important;' +
-      'display:none!important;background:none!important;}';
+      '#sf-drug-alarm{position:fixed;bottom:16px;left:16px;z-index:2147483000;' +
+      'display:flex;align-items:center;gap:7px;padding:8px 14px;border-radius:9999px;' +
+      'font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
+      'color:#f1f2f4;background:#1d1f24;border:1px solid #34373f;' +
+      'box-shadow:0 4px 16px rgba(0,0,0,.40);cursor:pointer;user-select:none;' +
+      '-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .2s ease,border-color .2s ease;}' +
+      '#sf-drug-alarm:hover{transform:translateY(-1px);}' +
+      '#sf-drug-alarm .sf-dot{width:8px;height:8px;border-radius:50%;background:#ffb74d;flex:0 0 auto;}' +
+      '#sf-drug-alarm .sf-text{white-space:nowrap;}' +
+      '#sf-drug-alarm.sf-idle{opacity:.8;}#sf-drug-alarm.sf-idle .sf-dot{background:#9aa0aa;}' +
+      '#sf-drug-alarm.sf-err{background:#3a1d1d;border-color:#7a2e2e;color:#ffdada;}' +
+      '#sf-drug-alarm.sf-err .sf-dot{background:#ef5350;}' +
+      '#sf-drug-alarm.sf-ready{background:#15401d;border-color:#2e7d32;color:#e2f6e6;}' +
+      '#sf-drug-alarm.sf-ready .sf-dot{background:#66bb6a;animation:sf-drug-pulse 1.6s ease-in-out infinite;}' +
+      '@keyframes sf-drug-pulse{0%,100%{box-shadow:0 0 0 0 rgba(102,187,106,.55);}50%{box-shadow:0 0 0 6px rgba(102,187,106,0);}}';
     (document.head || document.documentElement).appendChild(s);
   }
 
-  function ensureDrugBadge() {
-    const list = document.querySelector('ul[class*="status-icons___"]');
-    if (!list) return null; // sidebar not rendered yet — retried by the 1s tick
-    let el = document.getElementById('sf-drug-badge');
-    if (!el) {
-      el = document.createElement('li');
-      el.id = 'sf-drug-badge';
-      el.style.cssText = 'list-style:none;display:flex;align-items:center;' +
-        'margin-right:8px;font-weight:700;cursor:pointer;white-space:nowrap;';
-      el.addEventListener('click', onDrugBadgeClick);
-    }
-    // (Re)insert as the first list item if missing or moved (Torn re-renders
-    // the sidebar on navigation, detaching our element).
-    if (el.parentElement !== list || list.firstElementChild !== el) {
-      list.insertBefore(el, list.firstChild);
+  function ensureDrugAlarm() {
+    let el = document.getElementById('sf-drug-alarm');
+    if (!el && document.body) {
+      el = document.createElement('div');
+      el.id = 'sf-drug-alarm';
+      const dot = document.createElement('span');
+      dot.className = 'sf-dot';
+      const txt = document.createElement('span');
+      txt.className = 'sf-text';
+      el.appendChild(dot);
+      el.appendChild(txt);
+      el.addEventListener('click', onDrugAlarmClick);
+      document.body.appendChild(el);
     }
     return el;
   }
 
   // Click: with a working key, jump to the Items page (to take a drug);
   // otherwise (no key / key error) open the key prompt so it can be fixed.
-  function onDrugBadgeClick() {
+  function onDrugAlarmClick() {
     if (drugApiKey && !drugLastError) {
       window.location.href = 'https://www.torn.com/item.php';
     } else {
@@ -1814,34 +1817,33 @@
     }
   }
 
-  function renderDrugBadge() {
-    const el = ensureDrugBadge();
+  function paintDrugAlarm(el, stateClass, text, title) {
+    el.className = stateClass;
+    el.title = title;
+    const t = el.querySelector('.sf-text');
+    if (t) t.textContent = text;
+  }
+
+  function renderDrugAlarm() {
+    const el = ensureDrugAlarm();
     if (!el) return;
     if (!drugApiKey) {
-      el.textContent = '💊 set key';
-      el.style.color = '#9e9e9e';
-      el.title = 'StatForge — click to set your Torn API key';
+      paintDrugAlarm(el, 'sf-idle', '💊 Set API key', 'StatForge — click to set your Torn API key');
       return;
     }
     if (drugLastError) {
-      el.textContent = '💊 ' + drugLastError;
-      el.style.color = '#ef5350';
-      el.title = 'StatForge — API key problem; click to re-enter it';
+      paintDrugAlarm(el, 'sf-err', '💊 ' + drugLastError, 'StatForge — API key problem; click to re-enter it');
       return;
     }
-    el.title = 'StatForge drug cooldown — click to open Items';
     if (drugCooldownSec === null) {
-      el.textContent = '💊 …';
-      el.style.color = '#9e9e9e';
+      paintDrugAlarm(el, 'sf-idle', '💊 …', 'StatForge drug cooldown');
       return;
     }
     const remaining = drugCooldownSec - Math.floor((Date.now() - drugFetchAt) / 1000);
     if (remaining <= 0) {
-      el.textContent = '💊 ready';
-      el.style.color = '#66bb6a';
+      paintDrugAlarm(el, 'sf-ready', '💊 Drug ready', 'StatForge — drug cooldown over; click to open Items');
     } else {
-      el.textContent = '💊 ' + fmtCooldown(remaining);
-      el.style.color = '#ffb74d';
+      paintDrugAlarm(el, '', '💊 ' + fmtCooldown(remaining), 'StatForge drug cooldown — click to open Items');
     }
   }
 
@@ -1855,7 +1857,7 @@
     drugLastError = null;
     drugBadKeyHandled = false; // a freshly entered bad key may re-prompt
     drugCooldownSec = null;
-    renderDrugBadge();
+    renderDrugAlarm();
     fetchDrugCooldown();
   }
 
@@ -1868,7 +1870,7 @@
         if (data && data.error) {
           const badKey = data.error.code === 2; // 2 = incorrect key
           drugLastError = badKey ? 'Bad key' : 'API error';
-          renderDrugBadge();
+          renderDrugAlarm();
           // An invalid key never recovers on its own — prompt once to re-enter
           // it (guarded so we don't nag on every 60s poll). fetch only runs
           // while actively viewed, so the prompt never fires in a background tab.
@@ -1886,19 +1888,19 @@
         } else {
           drugLastError = 'API error';
         }
-        renderDrugBadge();
+        renderDrugAlarm();
       })
-      .catch(() => { drugLastError = 'Net error'; renderDrugBadge(); });
+      .catch(() => { drugLastError = 'Net error'; renderDrugAlarm(); });
   }
 
   function initDrugCooldown() {
     if (!document.body) { setTimeout(initDrugCooldown, 300); return; }
-    injectDrugBadgeStyle();
-    ensureDrugBadge();
-    renderDrugBadge();
+    injectDrugAlarmStyle();
+    ensureDrugAlarm();
+    renderDrugAlarm();
     fetchDrugCooldown();
     setInterval(() => { if (isActivelyViewed()) fetchDrugCooldown(); }, DRUG_POLL_MS);
-    setInterval(renderDrugBadge, 1000); // live local countdown + self-heal badge
+    setInterval(renderDrugAlarm, 1000); // live local countdown + self-heal
     document.addEventListener('visibilitychange', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
     window.addEventListener('focus', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
   }
