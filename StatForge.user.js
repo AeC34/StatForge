@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.11.6
+// @version      1.11.8
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -1751,6 +1751,7 @@
   // self-contained styled floating pill (own id + namespaced classes), so no
   // Torn styling can bleed into it.
   const DRUG_POLL_MS = 60000;
+  const DRUG_ALARM_SEC = 300; // only show the alarm in the final 5 minutes
   let drugApiKey      = store.get('trh_api_key', '');
   let drugCooldownSec = null;   // last fetched remaining seconds (drug)
   let drugFetchAt     = 0;      // Date.now() when last fetched
@@ -1773,20 +1774,23 @@
     s.id = 'sf-drug-alarm-style';
     s.textContent =
       '#sf-drug-alarm{position:fixed;bottom:16px;left:16px;z-index:2147483000;' +
-      'display:flex;align-items:center;gap:7px;padding:8px 14px;border-radius:9999px;' +
-      'font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
-      'color:#f1f2f4;background:#1d1f24;border:1px solid #34373f;' +
-      'box-shadow:0 4px 16px rgba(0,0,0,.40);cursor:pointer;user-select:none;' +
+      'display:flex;align-items:center;gap:14px;padding:16px 28px;border-radius:9999px;' +
+      'font:700 26px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
+      'color:#f1f2f4;background:#1d1f24;border:2px solid #34373f;' +
+      'box-shadow:0 6px 22px rgba(0,0,0,.45);cursor:pointer;user-select:none;' +
       '-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .2s ease,border-color .2s ease;}' +
       '#sf-drug-alarm:hover{transform:translateY(-1px);}' +
-      '#sf-drug-alarm .sf-dot{width:8px;height:8px;border-radius:50%;background:#ffb74d;flex:0 0 auto;}' +
+      '#sf-drug-alarm .sf-dot{width:16px;height:16px;border-radius:50%;background:#ffb74d;flex:0 0 auto;}' +
       '#sf-drug-alarm .sf-text{white-space:nowrap;}' +
-      '#sf-drug-alarm.sf-idle{opacity:.8;}#sf-drug-alarm.sf-idle .sf-dot{background:#9aa0aa;}' +
+      '#sf-drug-alarm.sf-idle{opacity:.85;}#sf-drug-alarm.sf-idle .sf-dot{background:#9aa0aa;}' +
       '#sf-drug-alarm.sf-err{background:#3a1d1d;border-color:#7a2e2e;color:#ffdada;}' +
       '#sf-drug-alarm.sf-err .sf-dot{background:#ef5350;}' +
-      '#sf-drug-alarm.sf-ready{background:#15401d;border-color:#2e7d32;color:#e2f6e6;}' +
-      '#sf-drug-alarm.sf-ready .sf-dot{background:#66bb6a;animation:sf-drug-pulse 1.6s ease-in-out infinite;}' +
-      '@keyframes sf-drug-pulse{0%,100%{box-shadow:0 0 0 0 rgba(102,187,106,.55);}50%{box-shadow:0 0 0 6px rgba(102,187,106,0);}}';
+      '#sf-drug-alarm.sf-alarm{background:#3a2a12;border-color:#b26a00;color:#ffd9a3;}' +
+      '#sf-drug-alarm.sf-alarm .sf-dot{background:#ffb74d;}' +
+      '#sf-drug-alarm.sf-ready{background:#15401d;border-color:#2e7d32;color:#e2f6e6;' +
+      'animation:sf-drug-blink 1s ease-in-out infinite;}' +
+      '#sf-drug-alarm.sf-ready .sf-dot{background:#66bb6a;}' +
+      '@keyframes sf-drug-blink{0%,100%{opacity:1;}50%{opacity:.2;}}';
     (document.head || document.documentElement).appendChild(s);
   }
 
@@ -1827,23 +1831,28 @@
   function renderDrugAlarm() {
     const el = ensureDrugAlarm();
     if (!el) return;
+    // Set-key / error states stay visible so the alarm can be configured/fixed.
     if (!drugApiKey) {
+      el.style.display = 'flex';
       paintDrugAlarm(el, 'sf-idle', '💊 Set API key', 'StatForge — click to set your Torn API key');
       return;
     }
     if (drugLastError) {
+      el.style.display = 'flex';
       paintDrugAlarm(el, 'sf-err', '💊 ' + drugLastError, 'StatForge — API key problem; click to re-enter it');
       return;
     }
-    if (drugCooldownSec === null) {
-      paintDrugAlarm(el, 'sf-idle', '💊 …', 'StatForge drug cooldown');
-      return;
-    }
+    // No data yet, or more than 5 minutes left → stay hidden.
+    if (drugCooldownSec === null) { el.style.display = 'none'; return; }
     const remaining = drugCooldownSec - Math.floor((Date.now() - drugFetchAt) / 1000);
     if (remaining <= 0) {
+      el.style.display = 'flex';
       paintDrugAlarm(el, 'sf-ready', '💊 Drug ready', 'StatForge — drug cooldown over; click to open Items');
+    } else if (remaining <= DRUG_ALARM_SEC) {
+      el.style.display = 'flex';
+      paintDrugAlarm(el, 'sf-alarm', '💊 ' + fmtCooldown(remaining), 'StatForge drug cooldown — click to open Items');
     } else {
-      paintDrugAlarm(el, '', '💊 ' + fmtCooldown(remaining), 'StatForge drug cooldown — click to open Items');
+      el.style.display = 'none';
     }
   }
 
