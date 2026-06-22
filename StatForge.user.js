@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.12.3
+// @version      1.13.0
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -700,10 +700,9 @@
   //   3. counter != planned reps  -> fill the counter for this stat
   //   4. otherwise                -> click TRAIN for this stat
   //
-  // The fill step relies on computeRepPlan + current energy to pick a
-  // rep count that keeps the ratio moving forward; on each click the
-  // plan is recomputed so drift after a training session is reflected
-  // in the next fill value.
+  // The fill step sets the counter to 999 (plannedRepsFor) so Torn spends all
+  // available energy on this stat, capped only by the stat's access headroom so
+  // it can't break special-gym access; it's recomputed on each click.
   function nextTrainStep(statKey, stats) {
     const statLabel = STAT_LABELS[statKey] || statKey;
 
@@ -733,16 +732,28 @@
     return { action: 'train', labelAfter: 'Train ' + statLabel };
   }
 
-  // Planned reps for `statKey` given current energy, computed via the
-  // same simulation as the Rep Plan section. Returns 0 if we can't
-  // compute (no energy info, stat not trainable, etc.), clamped to
-  // the 999 counter cap.
+  // Counter value for `statKey`. We fill 999 so Torn trains as many reps as
+  // the player's energy allows (Torn caps the actual count to available
+  // energy — e.g. 150 energy at a 50/train gym trains 3). The ONLY limit we
+  // impose is the stat's special-gym access headroom, so a large energy dump
+  // can't push the stat past the x1.25 access limit. The high stat is uncapped
+  // (headroom = Infinity), so it always shows 999. Returns 0 when there's no
+  // energy or the stat is already at its access limit.
   function plannedRepsFor(statKey, stats) {
     const energy = readPageEnergy();
     if (!energy || energy.current <= 0) return 0;
-    const plan = computeRepPlan(stats, selectedRatio, highStat, energy.current);
-    const reps = plan[statKey] || 0;
-    return Math.min(reps, 999);
+    const roles = getRoles(highStat);
+    const bestGym = {};
+    for (const k of Object.keys(STAT_LABELS)) {
+      const best = findBestGymForStat(k);
+      if (!best) continue;
+      const cost = readGymEnergyCost(best.id);
+      if (!cost || cost <= 0) continue;
+      bestGym[k] = { id: best.id, dots: best.dots, cost: cost };
+    }
+    const caps = computeAccessCaps(stats, selectedRatio, highStat, roles, bestGym);
+    const cap = caps[statKey];
+    return Math.min(999, cap === Infinity ? 999 : Math.max(0, cap));
   }
 
   // Render-time label: tells the user what their NEXT click will do.
@@ -1064,62 +1075,6 @@
     return caps;
   }
 
-  // Plan reps within a total energy budget. For each stat, use its best
-  // unlocked gym's dots AND that gym's per-rep energy cost (read live from the
-  // gym tile's aria-label). Per-rep gains use the real Vladar estimate
-  // (estGainPerTrain), so a stat that's already at its ratio target stops
-  // there instead of soaking up reps — e.g. a def build's low dex (13.5% in
-  // aec3) reaches its target in ~1 rep and surplus energy then flows to the
-  // high stat rather than over-training the dump. P1: never allocate a rep
-  // that would break special-gym access (x1.25 ratio). P2: among the stats
-  // still allowed, train the one furthest behind its build-ratio target. The
-  // high stat is uncapped, so once the others sit at target/limit the surplus
-  // goes to the high stat — which raises the limit and grows the whole build.
-  function computeRepPlan(stats, ratioKey, highStatKey, availableEnergy) {
-    const plan = { str: 0, spd: 0, def: 0, dex: 0 };
-    if (!availableEnergy || availableEnergy <= 0) return plan;
-    const sim = { str: stats.str || 0, spd: stats.spd || 0, def: stats.def || 0, dex: stats.dex || 0 };
-    const roles = getRoles(highStatKey);
-
-    const bestGym = {};
-    for (const k of Object.keys(STAT_LABELS)) {
-      const best = findBestGymForStat(k);
-      if (!best) continue;
-      const cost = readGymEnergyCost(best.id);
-      if (!cost || cost <= 0) continue;
-      bestGym[k] = { id: best.id, dots: best.dots, cost: cost };
-    }
-
-    // P1 — hard caps that preserve special-gym access. Computed from the real
-    // current stats (conservative: the high stat may rise during the plan,
-    // widening the true limit, so we never over-allocate).
-    const accessCaps = computeAccessCaps(stats, ratioKey, highStatKey, roles, bestGym);
-    const planHappy = readPageHappy();
-
-    let energyLeft = availableEnergy;
-    const safetyMax = 10000;
-    for (let i = 0; i < safetyMax; i++) {
-      const targets = computeTargets(sim, ratioKey, highStatKey);
-      let worst = null, worstPct = Infinity;
-      for (const k of Object.keys(STAT_LABELS)) {
-        if (!targets[k]) continue;
-        if (isStatDumped(k, ratioKey, roles)) continue;
-        if (!bestGym[k]) continue;
-        if (bestGym[k].cost > energyLeft) continue;
-        if (plan[k] >= accessCaps[k]) continue;   // P1: don't break gym access
-        const pct = (sim[k] || 0) / targets[k];
-        if (pct < worstPct) { worstPct = pct; worst = k; }
-      }
-      if (!worst) break;
-      // P2 — advance the build ratio using the real per-train gain estimate so
-      // a stat at target stops there and surplus flows to the high stat.
-      sim[worst] += estGainPerTrain(sim[worst], bestGym[worst].dots, bestGym[worst].cost, planHappy, gymMults[worst] || 1);
-      energyLeft -= bestGym[worst].cost;
-      plan[worst]++;
-    }
-    return plan;
-  }
-
   function getDriftWarnings(stats, targets, roles) {
     if (history.length < 2) return [];
     const prev = history[history.length - 2];
@@ -1285,33 +1240,44 @@
 
       ${(() => {
         const energy = readPageEnergy();
-        const plan = energy && energy.current > 0
-          ? computeRepPlan(stats, selectedRatio, highStat, energy.current)
-          : { str: 0, spd: 0, def: 0, dex: 0 };
-        const planSum = plan.str + plan.spd + plan.def + plan.dex;
+        const roles = getRoles(highStat);
+        const bestGym = {};
+        for (const k of Object.keys(STAT_LABELS)) {
+          const best = findBestGymForStat(k);
+          if (!best) continue;
+          const cost = readGymEnergyCost(best.id);
+          if (!cost || cost <= 0) continue;
+          bestGym[k] = { id: best.id, dots: best.dots, cost: cost };
+        }
+        const caps = computeAccessCaps(stats, selectedRatio, highStat, roles, bestGym);
         const energyLine = energy
           ? `Energy ${fmtNum(energy.current)}/${fmtNum(energy.max)}`
           : 'Energy not detected on page';
-        const planRows = Object.entries(STAT_LABELS).map(([k, l]) => {
-          const best = findBestGymForStat(k);
+        const rows = Object.entries(STAT_LABELS).map(([k, l]) => {
+          const best = bestGym[k];
           const gymSuffix = best ? ` <span style="color:#888;font-size:10px">@ ${escapeHtml(gymName(best.id))}</span>` : '';
+          const cap = caps[k];
+          let txt, col = '#ddd';
+          if (k === highStat || cap === Infinity) { txt = 'no limit'; }
+          else if (cap <= 0) { txt = 'at limit'; col = '#f87171'; }
+          else { txt = cap + ' trains left'; }
           return `
           <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px">
             <span style="color:${STAT_COLORS[k]}">${l}${gymSuffix}</span>
-            <span style="color:#ddd;font-weight:700">${plan[k]} reps</span>
+            <span style="color:${col};font-weight:700">${txt}</span>
           </div>`;
         }).join('');
         return `
       <div class="trh-section">
         <div class="trh-label trh-collapsible" data-trh-collapse="repplan" style="cursor:pointer;user-select:none">
-          <span style="display:inline-block;width:12px;text-align:center">${collapseRepPlan ? '▶' : '▼'}</span> Rep Plan
+          <span style="display:inline-block;width:12px;text-align:center">${collapseRepPlan ? '▶' : '▼'}</span> Headroom to gym limit
         </div>
         <div${collapseRepPlan ? ' style="display:none"' : ''}>
           <div class="trh-rec-box">
             <div style="font-size:11px;color:#888;margin-bottom:6px">${energyLine}</div>
-            ${planSum > 0 ? planRows : '<div style="font-size:11px;color:#888">Need energy and an active gym to compute a plan.</div>'}
+            ${rows}
             <div style="font-size:10px;color:#888;margin-top:8px;text-align:center">
-              Use the Train Next button above - it switches gym, fills the counter for the target stat, and trains.
+              Train Next fills the counter to 999 (uses all your energy) but never past a stat's headroom, so you keep your special gyms.
             </div>
           </div>
         </div>
