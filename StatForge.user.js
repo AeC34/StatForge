@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.12.2
+// @version      1.12.3
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -980,19 +980,18 @@
   // Published Vladar per-train gym-gain estimate, including the perk Modifier.
   // The stat term is the LINEAR regime, which only holds below ~50M; above
   // that Torn dampens gains, so we clamp the stat input at 50M (without the
-  // clamp this blows up at high stats — e.g. ~2.3M/train at 500M, ~50x too
-  // high — which wrecks both the access caps and the rep allocation).
-  // Used to convert access headroom into a safe rep count and to advance the
-  // rep-plan sim. Still biased HIGH (generous happy floor + safety factor) so
-  // we OVERestimate gain, allocate conservatively, and never cross the x1.25
-  // access limit. Not a precise predictor of resulting stat values.
+  // clamp this blows up at high stats — e.g. ~2.3M/train at 500M).
+  // Verified accurate against a real train: 1 rep at George's (dex 7.3 dots,
+  // 10 energy, 68M dex) gained 30,390.70; this returns ~30,100 at happy 4000
+  // and ~30,470 at happy 5000 — within ~1%. Returns the honest estimate; the
+  // access-cap caller applies its own safety margin so high happy can't make
+  // an under-estimate cost gym access.
   function estGainPerTrain(statVal, dots, energyPerTrain, happy, mult) {
     const H = Math.max(happy || 0, 4000) + 250;
     const S = Math.min(statVal || 0, 50000000); // gains saturate above ~50M
     const inner = (3.48e-7 * Math.log(H) + 3.09e-6) * S
                 + 6.83e-5 * H - 0.03;
-    const g = (mult || 1) * (dots || 0) * (energyPerTrain || 0) * Math.max(inner, 0);
-    return g * 1.3; // safety factor: bias high so we stop early, never overshoot
+    return (mult || 1) * (dots || 0) * (energyPerTrain || 0) * Math.max(inner, 0);
   }
 
   // A build keeps special-gym access only if no trained (non-dump) secondary
@@ -1055,7 +1054,11 @@
       }
       const g = bestGym[k];
       if (headroom <= 0 || !g) { caps[k] = 0; continue; }
-      const perTrain = estGainPerTrain(stats[k] || 0, g.dots, g.cost, happy, gymMults[k] || 1);
+      // Bias the gain HIGH for the safety cap (1.5x) so training at higher
+      // happy than we read can't make us under-count reps and overshoot the
+      // x1.25 access limit. The rep-plan sim uses the honest (unbiased)
+      // estimate for accurate distribution.
+      const perTrain = estGainPerTrain(stats[k] || 0, g.dots, g.cost, happy, gymMults[k] || 1) * 1.5;
       caps[k] = perTrain > 0 ? Math.max(0, Math.floor(headroom / perTrain) - 1) : 0;
     }
     return caps;
