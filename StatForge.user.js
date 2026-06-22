@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.12.0
+// @version      1.12.1
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -125,8 +125,7 @@
   };
 
   // Gym id -> display name. Verified against gym.php DOM dumps.
-  // Id 32 ships as "Unknown" in Torn's UI - kept
-  // as null here so the script falls back to "Gym #32".
+  // Id 32 is Fight Club (10 dots, 10 energy/train).
   const GYM_NAMES = {
     1:  "Premier Fitness",
     2:  "Average Joes",
@@ -159,7 +158,7 @@
     29: "Total Rebound",
     30: "Elites",
     31: "The Sports Science Lab",
-    32: null,
+    32: "Fight Club",
   };
   const gymName = (id) => GYM_NAMES[id] || ('Gym #' + id);
 
@@ -1035,11 +1034,18 @@
     const trainedSecondary = secondaryPair.filter(k => !isStatDumped(k, ratioKey, roles));
     const splitN = Math.max(1, trainedSecondary.length);
     const happy = readPageHappy();
+    // Only protect the combo gym if it's CURRENTLY held. If the build can't
+    // satisfy it (e.g. aec3 Defense-high can never reach Balboa's
+    // def+dex >= 1.25*(str+spd)), enforcing it would freeze the secondary pair
+    // forever to chase a gym you don't have. The single-stat rule below is
+    // always kept — it aligns with the build's high stat and is restorable by
+    // training that stat.
+    const comboHeld = primarySum >= 1.25 * secondarySum;
 
     for (const k of order) {
       if (k === highStatKey) continue;
       let headroom = (high / 1.25) - (stats[k] || 0);          // single-stat rule
-      if (secondaryPair.includes(k)) {
+      if (comboHeld && secondaryPair.includes(k)) {
         const comboHeadroom = (primarySum / 1.25) - secondarySum;
         headroom = Math.min(headroom, comboHeadroom / splitN);  // combo rule
       }
