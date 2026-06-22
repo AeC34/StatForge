@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.11.8
-// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
+// @version      1.12.0
+// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
 // @grant        None
@@ -38,6 +38,11 @@
   let defensiveDump  = store.get('trh_def_dump', 'str');
   let customMults    = store.get('trh_custom', { high: 1.00, secondary: 0.80, tert1: 0.60, tert2: 0.60 });
   let history        = store.get('trh_history', []);
+  // Per-stat gym-gain multipliers (Steadfast + all gym-gain perks), combined
+  // multiplicatively. Defaults to 1.0 (no bonus) until fetched from the Torn
+  // API, so the rep plan still works for users without a key.
+  let gymMults       = store.get('trh_gym_mults', { str: 1, spd: 1, def: 1, dex: 1 });
+  let gymMultsFetchedAt = store.get('trh_gym_mults_at', 0);
   let theme          = store.get('trh_theme', 'dark');
   let collapseRepPlan = store.get('trh_collapse_repplan', true);
   let collapseStats   = store.get('trh_collapse_stats', true);
@@ -924,6 +929,136 @@
   // longest-behind stat, checks the remaining energy can cover one
   // rep at its best gym, and deducts the cost. Different stats can
   // therefore use different gyms with different costs.
+  // --- Gym-gain multipliers + special-gym access (Steadfast-aware planning) ---
+
+  // Parse every gym-gain perk line from a Torn user?selections=perks response
+  // into a per-stat multiplicative modifier. Per-stat lines (e.g. "+ 16% speed
+  // gym gains") apply to that stat; general lines (e.g. "+ 20% gym gains", no
+  // stat word) apply to all four. Each perk is its own factor (1 + pct/100),
+  // multiplied together — matching Torn's gym formula (perks stack
+  // multiplicatively, not additively). Verified against live API output.
+  function parseGymMultsFromPerks(data) {
+    const mults = { str: 1, spd: 1, def: 1, dex: 1 };
+    const lists = ['faction_perks', 'property_perks', 'education_perks', 'book_perks',
+                   'job_perks', 'merit_perks', 'enhancer_perks', 'stock_perks'];
+    const statWord = { strength: 'str', speed: 'spd', defense: 'def', defence: 'def', dexterity: 'dex' };
+    const reStat = /\+\s*([\d.]+)%\s+(strength|speed|defense|defence|dexterity)\s+gym gains/i;
+    const reGen  = /\+\s*([\d.]+)%\s+gym gains/i;
+    const reAnyStat = /(strength|speed|defense|defence|dexterity)/i;
+    for (const listKey of lists) {
+      const arr = data[listKey];
+      if (!Array.isArray(arr)) continue;
+      for (const line of arr) {
+        const ms = reStat.exec(line);
+        if (ms) {
+          const key = statWord[ms[2].toLowerCase()];
+          if (key) mults[key] *= (1 + parseFloat(ms[1]) / 100);
+          continue;
+        }
+        // General gym gains: mentions "gym gains" but names no specific stat.
+        if (/gym gains/i.test(line) && !reAnyStat.test(line)) {
+          const mg = reGen.exec(line);
+          if (mg) {
+            const f = 1 + parseFloat(mg[1]) / 100;
+            mults.str *= f; mults.spd *= f; mults.def *= f; mults.dex *= f;
+          }
+        }
+      }
+    }
+    return mults;
+  }
+
+  // Read current Happy from the gym page if present. Used only to bias the
+  // access-limit gain estimate. Text format not verified across all Torn
+  // builds; returns null when not found and the estimator falls back to a
+  // generous floor.
+  function readPageHappy() {
+    const text = document.body ? (document.body.textContent || '') : '';
+    const m = text.match(/([\d,]+)\s*\/\s*([\d,]+)\s*happy/i);
+    return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+  }
+
+  // Published Vladar per-train gym-gain estimate (stat < 50M linear regime),
+  // including the perk Modifier. Used ONLY to convert remaining access-ratio
+  // headroom into a safe number of trains. Deliberately biased HIGH (generous
+  // happy floor + safety factor) so we OVERestimate gain, allocate fewer
+  // trains, and stop before ever crossing the x1.25 access limit. This is not
+  // a precise predictor of resulting stat values.
+  function estGainPerTrain(statVal, dots, energyPerTrain, happy, mult) {
+    const H = Math.max(happy || 0, 4000) + 250;
+    const inner = (3.48e-7 * Math.log(H) + 3.09e-6) * (statVal || 0)
+                + 6.83e-5 * H - 0.03;
+    const g = (mult || 1) * (dots || 0) * (energyPerTrain || 0) * Math.max(inner, 0);
+    return g * 1.3; // safety factor: bias high so we stop early, never overshoot
+  }
+
+  // A build keeps special-gym access only if no trained (non-dump) secondary
+  // stat targets more than 80% of the high stat — i.e. the build's targets fit
+  // under the x1.25 access ceiling (high / 1.25 = 0.8 * high). baldr/hank/aec3
+  // all qualify; a balanced custom ratio (secondary > 80%) does not, so the
+  // access guard stays OFF for it and the plan is unchanged for those builds.
+  function buildKeepsSpecialGyms(ratioKey, roles) {
+    const conf = RATIOS[ratioKey];
+    if (!conf) return false;
+    const mults = conf.multipliers || {};
+    for (const role of ['secondary', 'tert1', 'tert2']) {
+      const k = roles[role];
+      if (!k || isStatDumped(k, ratioKey, roles)) continue;
+      const m = typeof mults[role] === 'number' ? mults[role] : 0;
+      if (m > 0.801) return false;
+    }
+    return true;
+  }
+
+  // P1 — max trains each stat may take before breaking special-gym access.
+  // Derived from the build's high stat: the single-stat gym (Hank's) needs
+  // high >= 1.25 * every other stat, and the combo gym needs the pair holding
+  // high to be >= 1.25 * the other pair (str/spd share Frontline; def/dex
+  // share Balboa). The high stat is uncapped (training it only widens access).
+  // Returns Infinity for every stat when the build isn't special-gym
+  // compatible, leaving the original plan untouched.
+  function computeAccessCaps(stats, ratioKey, highStatKey, roles, bestGym) {
+    const order = ['str', 'spd', 'def', 'dex'];
+    const caps = { str: Infinity, spd: Infinity, def: Infinity, dex: Infinity };
+    if (!buildKeepsSpecialGyms(ratioKey, roles)) return caps;
+
+    const high = stats[highStatKey] || 0;
+    if (high <= 0) return caps;
+    const primaryPair = (highStatKey === 'str' || highStatKey === 'spd')
+      ? ['str', 'spd'] : ['def', 'dex'];
+    const secondaryPair = order.filter(k => !primaryPair.includes(k));
+    const primarySum = primaryPair.reduce((a, k) => a + (stats[k] || 0), 0);
+    const secondarySum = secondaryPair.reduce((a, k) => a + (stats[k] || 0), 0);
+    // The combo headroom is shared by the secondary pair; split it only among
+    // the members the build actually trains so a dumped stat doesn't waste
+    // half the allowance.
+    const trainedSecondary = secondaryPair.filter(k => !isStatDumped(k, ratioKey, roles));
+    const splitN = Math.max(1, trainedSecondary.length);
+    const happy = readPageHappy();
+
+    for (const k of order) {
+      if (k === highStatKey) continue;
+      let headroom = (high / 1.25) - (stats[k] || 0);          // single-stat rule
+      if (secondaryPair.includes(k)) {
+        const comboHeadroom = (primarySum / 1.25) - secondarySum;
+        headroom = Math.min(headroom, comboHeadroom / splitN);  // combo rule
+      }
+      const g = bestGym[k];
+      if (headroom <= 0 || !g) { caps[k] = 0; continue; }
+      const perTrain = estGainPerTrain(stats[k] || 0, g.dots, g.cost, happy, gymMults[k] || 1);
+      caps[k] = perTrain > 0 ? Math.max(0, Math.floor(headroom / perTrain) - 1) : 0;
+    }
+    return caps;
+  }
+
+  // Plan reps within a total energy budget. For each stat, use its best
+  // unlocked gym's dots AND that gym's per-rep energy cost (read live from the
+  // gym tile's aria-label). Per-rep gains are weighted by the player's real
+  // gym-gain multipliers (Steadfast etc.). P1: never allocate a rep that would
+  // break special-gym access (x1.25 ratio). P2: among the stats still allowed,
+  // train the one furthest behind its build-ratio target. The high stat is
+  // uncapped, so when every other stat is held at its access limit the surplus
+  // energy goes to the high stat — which raises the limit for next time.
   function computeRepPlan(stats, ratioKey, highStatKey, availableEnergy) {
     const plan = { str: 0, spd: 0, def: 0, dex: 0 };
     if (!availableEnergy || availableEnergy <= 0) return plan;
@@ -939,6 +1074,11 @@
       bestGym[k] = { id: best.id, dots: best.dots, cost: cost };
     }
 
+    // P1 — hard caps that preserve special-gym access. Computed from the real
+    // current stats (conservative: the high stat may rise during the plan,
+    // widening the true limit, so we never over-allocate).
+    const accessCaps = computeAccessCaps(stats, ratioKey, highStatKey, roles, bestGym);
+
     let energyLeft = availableEnergy;
     const safetyMax = 10000;
     for (let i = 0; i < safetyMax; i++) {
@@ -946,15 +1086,16 @@
       let worst = null, worstPct = Infinity;
       for (const k of Object.keys(STAT_LABELS)) {
         if (!targets[k]) continue;
-        const isDump = isStatDumped(k, ratioKey, roles);
-        if (isDump) continue;
+        if (isStatDumped(k, ratioKey, roles)) continue;
         if (!bestGym[k]) continue;
         if (bestGym[k].cost > energyLeft) continue;
+        if (plan[k] >= accessCaps[k]) continue;   // P1: don't break gym access
         const pct = (sim[k] || 0) / targets[k];
         if (pct < worstPct) { worstPct = pct; worst = k; }
       }
       if (!worst) break;
-      sim[worst] += bestGym[worst].dots;
+      // P2 — advance the build ratio; gains weighted by perk multipliers.
+      sim[worst] += bestGym[worst].dots * (gymMults[worst] || 1);
       energyLeft -= bestGym[worst].cost;
       plan[worst]++;
     }
@@ -1325,6 +1466,31 @@
         <div style="margin-top:8px">
           <button class="trh-btn" id="trh-save-custom">Save as Custom Ratio</button>
         </div>
+      </div>
+      <hr class="trh-divider">
+      <div class="trh-section">
+        <div class="trh-label">Gym Gain Multipliers (Steadfast + perks)</div>
+        <div style="font-size:11px;color:#888;margin-bottom:8px">
+          Read from the Torn API (<code>user?selections=perks</code>) using your saved key — Steadfast, education, property and book gym-gain perks, combined the way Torn stacks them. The rep plan weights each stat's gains by these. Updated on load and when you refresh.
+        </div>
+        <div class="trh-ctrl-row" style="flex-wrap:wrap">
+          ${Object.entries(STAT_LABELS).map(([k, l]) => {
+            const pct = Math.round(((gymMults[k] || 1) - 1) * 1000) / 10;
+            return `<span class="trh-slot-mult" style="color:${STAT_COLORS[k]};margin-right:10px">${l}: +${pct}%</span>`;
+          }).join('')}
+        </div>
+        <div style="font-size:11px;color:${buildKeepsSpecialGyms(selectedRatio, roles) ? '#4ade80' : '#facc15'};margin-top:8px">
+          ${buildKeepsSpecialGyms(selectedRatio, roles)
+            ? `Special-gym access protection: <strong>ON</strong> for ${STAT_LABELS[highStat]}-high (keeps the x1.25 access ratio safe).`
+            : `Special-gym access protection: <strong>OFF</strong> — this ratio targets a secondary stat above 80% of your high stat, which can't keep the special gyms.`}
+        </div>
+        <div style="font-size:10px;color:#666;margin-top:4px">
+          ${gymMultsFetchedAt ? 'Last updated: ' + new Date(gymMultsFetchedAt).toLocaleString() : 'Not fetched yet — set a key and refresh.'}
+        </div>
+        <div class="trh-ctrl-row" style="margin-top:8px">
+          <button class="trh-btn" id="trh-set-apikey">Set API key</button>
+          <button class="trh-btn" id="trh-refresh-mults">Refresh now</button>
+        </div>
       </div>`;
   }
 
@@ -1555,6 +1721,16 @@
         selectedRatio = 'custom';
         store.set('trh_ratio', 'custom');
         injectPanel();
+        return;
+      }
+
+      if (id === 'trh-set-apikey') {
+        promptDrugApiKey();
+        return;
+      }
+
+      if (id === 'trh-refresh-mults') {
+        fetchGymMults();
         return;
       }
 
@@ -1868,6 +2044,7 @@
     drugCooldownSec = null;
     renderDrugAlarm();
     fetchDrugCooldown();
+    fetchGymMults();
   }
 
   function fetchDrugCooldown() {
@@ -1902,12 +2079,37 @@
       .catch(() => { drugLastError = 'Net error'; renderDrugAlarm(); });
   }
 
+  // Fetch the player's gym-gain perks once and cache the per-stat multipliers.
+  // Reuses the same key the drug alarm uses. Perks change rarely (Steadfast is
+  // monthly), so this only runs on load and when a key is (re)entered — not on
+  // the polling interval. Reads only api.torn.com; never scrapes the page.
+  function fetchGymMults() {
+    if (!drugApiKey || !isActivelyViewed()) return;
+    fetch('https://api.torn.com/user/?selections=perks&key=' +
+          encodeURIComponent(drugApiKey) + '&comment=StatForge')
+      .then(r => r.json())
+      .then(data => {
+        if (!data || data.error) return; // bad key is handled by the drug flow
+        gymMults = parseGymMultsFromPerks(data);
+        gymMultsFetchedAt = Date.now();
+        store.set('trh_gym_mults', gymMults);
+        store.set('trh_gym_mults_at', gymMultsFetchedAt);
+        // Refresh the gym panel so the rep plan reflects the new multipliers.
+        if (typeof isGymPage === 'function' && isGymPage()
+            && document.getElementById('trh-wrapper')) {
+          injectPanel();
+        }
+      })
+      .catch(() => {});
+  }
+
   function initDrugCooldown() {
     if (!document.body) { setTimeout(initDrugCooldown, 300); return; }
     injectDrugAlarmStyle();
     ensureDrugAlarm();
     renderDrugAlarm();
     fetchDrugCooldown();
+    fetchGymMults();
     setInterval(() => { if (isActivelyViewed()) fetchDrugCooldown(); }, DRUG_POLL_MS);
     setInterval(renderDrugAlarm, 1000); // live local countdown + self-heal
     document.addEventListener('visibilitychange', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
