@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.14.0
+// @version      1.15.0
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -998,6 +998,27 @@
     return room;
   }
 
+  // Train Next recommendation (Steadfast-aware, ratio-targeted). Among the
+  // non-dump, non-high stats still BELOW their ratio target, pick the one with
+  // the highest yield this month = best-gym dots x its gym-gain multiplier — so
+  // we ride the stat Steadfast boosts most while still heading for the ratio.
+  // A stat below its ratio target is also below the x1.25 gym limit, so it
+  // always has headroom. When every secondary has reached its target, train the
+  // high stat to raise the bar (which lifts every target and opens new room).
+  function recommendStat(stats, roles, targets) {
+    let pick = null, bestYield = -1;
+    for (const k of Object.keys(STAT_LABELS)) {
+      if (k === highStat) continue;
+      if (isStatDumped(k, selectedRatio, roles)) continue;
+      if (!targets[k] || (stats[k] || 0) >= targets[k]) continue; // at/over target: hold ratio
+      const best = findBestGymForStat(k);
+      if (!best) continue;
+      const yld = best.dots * (gymMults[k] || 1);
+      if (yld > bestYield) { bestYield = yld; pick = k; }
+    }
+    return pick || highStat; // all secondaries at target -> raise the bar via high stat
+  }
+
   function getDriftWarnings(stats, targets, roles) {
     if (history.length < 2) return [];
     const prev = history[history.length - 2];
@@ -1039,17 +1060,7 @@
   // Render tabs
 
   function renderOverview(stats, targets, roles, ratio) {
-    const rec = (() => {
-      let worst = null; let worstScore = Infinity;
-      for (const [key] of Object.entries(STAT_LABELS)) {
-        const isDump = isStatDumped(key, selectedRatio, roles);
-        if (isDump || !targets[key]) continue;
-        const actual = stats[key] || 0;
-        const score = actual / targets[key];
-        if (score < worstScore) { worstScore = score; worst = key; }
-      }
-      return worst;
-    })();
+    const rec = recommendStat(stats, roles, targets);
 
     const grade = overallGrade(stats, targets, roles, selectedRatio);
     const tbs = Object.values(stats).reduce((a, v) => a + (v || 0), 0);
@@ -1148,6 +1159,11 @@
           <div class="trh-rec-stat" style="color:${STAT_COLORS[rec]}">${STAT_LABELS[rec]}</div>
           <div style="font-size:11px;color:#888">
             Currently at ${fmtNum(stats[rec])} - Target ${fmtNum(Math.round(targets[rec]))} - ${needText}
+          </div>
+          <div style="font-size:10px;color:#a78bfa;margin-top:2px">
+            ${rec === highStat
+              ? 'High stat — training it raises every target and opens headroom'
+              : 'Best yield now' + ((gymMults[rec] || 1) > 1.001 ? ' (' + STAT_LABELS[rec] + ' +' + Math.round(((gymMults[rec] || 1) - 1) * 100) + '% gym gains)' : '') + ', while still heading for your ratio'}
           </div>
           ${gymHint}
           <button class="trh-btn" id="trh-train-now" data-trh-stat="${rec}" style="margin-top:10px;width:100%">
