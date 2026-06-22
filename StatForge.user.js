@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.12.1
+// @version      1.12.2
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -977,15 +977,19 @@
     return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
   }
 
-  // Published Vladar per-train gym-gain estimate (stat < 50M linear regime),
-  // including the perk Modifier. Used ONLY to convert remaining access-ratio
-  // headroom into a safe number of trains. Deliberately biased HIGH (generous
-  // happy floor + safety factor) so we OVERestimate gain, allocate fewer
-  // trains, and stop before ever crossing the x1.25 access limit. This is not
-  // a precise predictor of resulting stat values.
+  // Published Vladar per-train gym-gain estimate, including the perk Modifier.
+  // The stat term is the LINEAR regime, which only holds below ~50M; above
+  // that Torn dampens gains, so we clamp the stat input at 50M (without the
+  // clamp this blows up at high stats — e.g. ~2.3M/train at 500M, ~50x too
+  // high — which wrecks both the access caps and the rep allocation).
+  // Used to convert access headroom into a safe rep count and to advance the
+  // rep-plan sim. Still biased HIGH (generous happy floor + safety factor) so
+  // we OVERestimate gain, allocate conservatively, and never cross the x1.25
+  // access limit. Not a precise predictor of resulting stat values.
   function estGainPerTrain(statVal, dots, energyPerTrain, happy, mult) {
     const H = Math.max(happy || 0, 4000) + 250;
-    const inner = (3.48e-7 * Math.log(H) + 3.09e-6) * (statVal || 0)
+    const S = Math.min(statVal || 0, 50000000); // gains saturate above ~50M
+    const inner = (3.48e-7 * Math.log(H) + 3.09e-6) * S
                 + 6.83e-5 * H - 0.03;
     const g = (mult || 1) * (dots || 0) * (energyPerTrain || 0) * Math.max(inner, 0);
     return g * 1.3; // safety factor: bias high so we stop early, never overshoot
@@ -1059,12 +1063,15 @@
 
   // Plan reps within a total energy budget. For each stat, use its best
   // unlocked gym's dots AND that gym's per-rep energy cost (read live from the
-  // gym tile's aria-label). Per-rep gains are weighted by the player's real
-  // gym-gain multipliers (Steadfast etc.). P1: never allocate a rep that would
-  // break special-gym access (x1.25 ratio). P2: among the stats still allowed,
-  // train the one furthest behind its build-ratio target. The high stat is
-  // uncapped, so when every other stat is held at its access limit the surplus
-  // energy goes to the high stat — which raises the limit for next time.
+  // gym tile's aria-label). Per-rep gains use the real Vladar estimate
+  // (estGainPerTrain), so a stat that's already at its ratio target stops
+  // there instead of soaking up reps — e.g. a def build's low dex (13.5% in
+  // aec3) reaches its target in ~1 rep and surplus energy then flows to the
+  // high stat rather than over-training the dump. P1: never allocate a rep
+  // that would break special-gym access (x1.25 ratio). P2: among the stats
+  // still allowed, train the one furthest behind its build-ratio target. The
+  // high stat is uncapped, so once the others sit at target/limit the surplus
+  // goes to the high stat — which raises the limit and grows the whole build.
   function computeRepPlan(stats, ratioKey, highStatKey, availableEnergy) {
     const plan = { str: 0, spd: 0, def: 0, dex: 0 };
     if (!availableEnergy || availableEnergy <= 0) return plan;
@@ -1084,6 +1091,7 @@
     // current stats (conservative: the high stat may rise during the plan,
     // widening the true limit, so we never over-allocate).
     const accessCaps = computeAccessCaps(stats, ratioKey, highStatKey, roles, bestGym);
+    const planHappy = readPageHappy();
 
     let energyLeft = availableEnergy;
     const safetyMax = 10000;
@@ -1100,8 +1108,9 @@
         if (pct < worstPct) { worstPct = pct; worst = k; }
       }
       if (!worst) break;
-      // P2 — advance the build ratio; gains weighted by perk multipliers.
-      sim[worst] += bestGym[worst].dots * (gymMults[worst] || 1);
+      // P2 — advance the build ratio using the real per-train gain estimate so
+      // a stat at target stops there and surplus flows to the high stat.
+      sim[worst] += estGainPerTrain(sim[worst], bestGym[worst].dots, bestGym[worst].cost, planHappy, gymMults[worst] || 1);
       energyLeft -= bestGym[worst].cost;
       plan[worst]++;
     }
