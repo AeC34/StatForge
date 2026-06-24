@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.15.0
+// @version      1.16.0
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -83,6 +83,12 @@
   // button while this is set are ignored — Torn's UI hasn't reached the
   // expected post-click state yet, so processing another click would race.
   let trainStepInFlight = false;
+  // Train Next state. failSafeStat: the stat the fail-safe is currently catching
+  // back up to its cap (sticky until it reaches 100% of target) so a starved
+  // stat isn't abandoned. recReason: short text explaining the current pick,
+  // read by the Train Next render so the UI matches the actual strategy.
+  let failSafeStat = null;
+  let recReason = '';
   const STAT_COLORS  = { str: '#f97316', spd: '#22d3ee', def: '#a78bfa', dex: '#4ade80' };
 
   // Gym dots per stat, keyed by Torn gym id.
@@ -998,25 +1004,63 @@
     return room;
   }
 
-  // Train Next recommendation (Steadfast-aware, ratio-targeted). Among the
-  // non-dump, non-high stats still BELOW their ratio target, pick the one with
-  // the highest yield this month = best-gym dots x its gym-gain multiplier — so
-  // we ride the stat Steadfast boosts most while still heading for the ratio.
-  // A stat below its ratio target is also below the x1.25 gym limit, so it
-  // always has headroom. When every secondary has reached its target, train the
-  // high stat to raise the bar (which lifts every target and opens new room).
+  // Train Next recommendation (Steadfast-aware, ratio-targeted).
+  //
+  // Strategy: ride the single highest-yield stat (best-gym dots x your gym-gain
+  // multiplier) for as long as possible. When that stat reaches its ratio cap
+  // it can't be trained further without breaking the ratio, so instead of
+  // draining energy into a lower-yield stat we train the HIGH stat — which
+  // lifts every cap and re-opens headroom for the best stat. So the loop is:
+  // train best -> best hits cap -> bump high to open room -> train best again.
+  // The dump slot (roles.tert2, e.g. aec3 Dex) is never "ridden" this way; it
+  // only gets topped up by the fail-safe below.
+  //
+  // Fail-safe: because we keep raising the high stat, every other stat's cap
+  // keeps rising and a neglected stat would drift ever further below ratio. So
+  // whenever any trained stat falls below FAILSAFE_PCT of its cap it becomes
+  // top priority and is trained back up to its cap (sticky via failSafeStat)
+  // before we resume riding the best stat. This guarantees everything gets
+  // trained even though "best yield" never rotates on its own.
   function recommendStat(stats, roles, targets) {
-    let pick = null, bestYield = -1;
+    const FAILSAFE_PCT = 0.80; // catch a stat up once it drops below 80% of its cap
+    const trained = [];
     for (const k of Object.keys(STAT_LABELS)) {
       if (k === highStat) continue;
-      if (isStatDumped(k, selectedRatio, roles)) continue;
-      if (!targets[k] || (stats[k] || 0) >= targets[k]) continue; // at/over target: hold ratio
+      if (isStatDumped(k, selectedRatio, roles)) continue; // hard-dumped (mult 0): skip entirely
+      const target = targets[k];
+      if (!target) continue;
+      const cur = stats[k] || 0;
       const best = findBestGymForStat(k);
       if (!best) continue;
-      const yld = best.dots * (gymMults[k] || 1);
-      if (yld > bestYield) { bestYield = yld; pick = k; }
+      trained.push({
+        k,
+        pct: cur / target,            // 1.0 = at ratio cap
+        room: cur < target,           // still below the cap -> trainable
+        yld: best.dots * (gymMults[k] || 1),
+      });
     }
-    return pick || highStat; // all secondaries at target -> raise the bar via high stat
+    if (!trained.length) { failSafeStat = null; recReason = 'raise'; return highStat; }
+
+    // --- FAIL-SAFE: catch up a starved stat, sticky until it reaches its cap ---
+    if (failSafeStat) {
+      const fs = trained.find(c => c.k === failSafeStat);
+      if (!fs || fs.pct >= 1.0) failSafeStat = null; // recovered or no longer valid
+    }
+    if (!failSafeStat) {
+      const starved = trained.filter(c => c.pct < FAILSAFE_PCT);
+      if (starved.length) failSafeStat = starved.reduce((a, b) => (b.pct < a.pct ? b : a)).k;
+    }
+    if (failSafeStat) { recReason = 'failsafe'; return failSafeStat; }
+
+    // --- RIDE THE BEST STAT (the dump slot is excluded from riding) ---
+    const rideable = trained.filter(c => c.k !== roles.tert2);
+    const pool = rideable.length ? rideable : trained;
+    const best = pool.reduce((a, b) => (b.yld > a.yld ? b : a));
+    if (best.room) { recReason = 'best'; return best.k; } // train the best stat
+
+    // Best stat is capped -> train high to open more headroom for it.
+    recReason = 'headroom';
+    return highStat;
   }
 
   function getDriftWarnings(stats, targets, roles) {
@@ -1161,9 +1205,13 @@
             Currently at ${fmtNum(stats[rec])} - Target ${fmtNum(Math.round(targets[rec]))} - ${needText}
           </div>
           <div style="font-size:10px;color:#a78bfa;margin-top:2px">
-            ${rec === highStat
-              ? 'High stat — training it raises every target and opens headroom'
-              : 'Best yield now' + ((gymMults[rec] || 1) > 1.001 ? ' (' + STAT_LABELS[rec] + ' +' + Math.round(((gymMults[rec] || 1) - 1) * 100) + '% gym gains)' : '') + ', while still heading for your ratio'}
+            ${recReason === 'headroom'
+              ? 'High stat — opening headroom so you can keep training your best stat'
+              : recReason === 'raise'
+                ? 'High stat — every other stat is at its ratio cap; raising the bar'
+                : recReason === 'failsafe'
+                  ? 'Catch-up — below 80% of its ratio cap, topping it back up'
+                  : 'Best yield now' + ((gymMults[rec] || 1) > 1.001 ? ' (' + STAT_LABELS[rec] + ' +' + Math.round(((gymMults[rec] || 1) - 1) * 100) + '% gym gains)' : '') + ', riding it as long as possible'}
           </div>
           ${gymHint}
           <button class="trh-btn" id="trh-train-now" data-trh-stat="${rec}" style="margin-top:10px;width:100%">
