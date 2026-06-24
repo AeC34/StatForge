@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.16.0
+// @version      1.17.0
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -85,9 +85,14 @@
   let trainStepInFlight = false;
   // Train Next state. failSafeStat: the stat the fail-safe is currently catching
   // back up to its cap (sticky until it reaches 100% of target) so a starved
-  // stat isn't abandoned. recReason: short text explaining the current pick,
-  // read by the Train Next render so the UI matches the actual strategy.
+  // stat isn't abandoned. headroomBaseHigh: the high-stat value captured when we
+  // started a headroom raise — we keep training the high stat until it is
+  // HEADROOM_STEP above this, so each unlock opens a meaningful chunk of room
+  // instead of one rep's worth (which would just flip back to the best stat).
+  // recReason: short text explaining the current pick, read by the Train Next
+  // render so the UI matches the actual strategy.
   let failSafeStat = null;
+  let headroomBaseHigh = null;
   let recReason = '';
   const STAT_COLORS  = { str: '#f97316', spd: '#22d3ee', def: '#a78bfa', dex: '#4ade80' };
 
@@ -1015,14 +1020,21 @@
   // The dump slot (roles.tert2, e.g. aec3 Dex) is never "ridden" this way; it
   // only gets topped up by the fail-safe below.
   //
+  // Headroom raises are sticky: raising the high stat by a single rep opens only
+  // a sliver of room and would flip the pick straight back to the best stat, so
+  // once we start a raise we keep training the high stat until it is HEADROOM_STEP
+  // (5%) above where it was when the best stat capped — opening ~5% more headroom
+  // each time before we resume riding the best stat.
+  //
   // Fail-safe: because we keep raising the high stat, every other stat's cap
   // keeps rising and a neglected stat would drift ever further below ratio. So
   // whenever any trained stat falls below FAILSAFE_PCT of its cap it becomes
   // top priority and is trained back up to its cap (sticky via failSafeStat)
-  // before we resume riding the best stat. This guarantees everything gets
-  // trained even though "best yield" never rotates on its own.
+  // before we resume the strategy. This guarantees everything gets trained even
+  // though "best yield" never rotates on its own.
   function recommendStat(stats, roles, targets) {
-    const FAILSAFE_PCT = 0.80; // catch a stat up once it drops below 80% of its cap
+    const FAILSAFE_PCT = 0.80;  // catch a stat up once it drops below 80% of its cap
+    const HEADROOM_STEP = 0.05; // raise the high stat 5% per headroom unlock
     const trained = [];
     for (const k of Object.keys(STAT_LABELS)) {
       if (k === highStat) continue;
@@ -1039,7 +1051,7 @@
         yld: best.dots * (gymMults[k] || 1),
       });
     }
-    if (!trained.length) { failSafeStat = null; recReason = 'raise'; return highStat; }
+    if (!trained.length) { failSafeStat = null; headroomBaseHigh = null; recReason = 'raise'; return highStat; }
 
     // --- FAIL-SAFE: catch up a starved stat, sticky until it reaches its cap ---
     if (failSafeStat) {
@@ -1052,13 +1064,21 @@
     }
     if (failSafeStat) { recReason = 'failsafe'; return failSafeStat; }
 
+    // --- HEADROOM RAISE (sticky): keep training high until it is +5% from base ---
+    const high = stats[highStat] || 0;
+    if (headroomBaseHigh) {
+      if (high >= headroomBaseHigh * (1 + HEADROOM_STEP)) headroomBaseHigh = null; // reached +5%
+      else { recReason = 'headroom'; return highStat; }
+    }
+
     // --- RIDE THE BEST STAT (the dump slot is excluded from riding) ---
     const rideable = trained.filter(c => c.k !== roles.tert2);
     const pool = rideable.length ? rideable : trained;
     const best = pool.reduce((a, b) => (b.yld > a.yld ? b : a));
     if (best.room) { recReason = 'best'; return best.k; } // train the best stat
 
-    // Best stat is capped -> train high to open more headroom for it.
+    // Best stat is capped -> start a 5% high-stat raise to open more headroom.
+    headroomBaseHigh = high;
     recReason = 'headroom';
     return highStat;
   }
@@ -1629,7 +1649,7 @@
 
       if (btn.dataset.trhTab)   { activeTab = btn.dataset.trhTab; injectPanel(); return; }
       if (btn.dataset.trhRatio) { selectedRatio = btn.dataset.trhRatio; store.set('trh_ratio', selectedRatio); injectPanel(); return; }
-      if (btn.dataset.trhHigh)  { highStat = btn.dataset.trhHigh; store.set('trh_high', highStat); injectPanel(); return; }
+      if (btn.dataset.trhHigh)  { highStat = btn.dataset.trhHigh; store.set('trh_high', highStat); headroomBaseHigh = null; failSafeStat = null; injectPanel(); return; }
       if (btn.dataset.trhTheme) { theme = btn.dataset.trhTheme; store.set('trh_theme', theme); injectPanel(); return; }
       if (btn.dataset.trhDefdump) { defensiveDump = btn.dataset.trhDefdump; store.set('trh_def_dump', defensiveDump); injectPanel(); return; }
       if (btn.dataset.trhCollapse) {
