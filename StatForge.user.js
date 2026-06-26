@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.17.0
-// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching, plus a styled floating drug-cooldown alarm shown on all Torn pages via the Torn API (requires your own API key). Also reads your gym-gain perks (Steadfast, education, property, books) from the Torn API to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
+// @version      1.18.0
+// @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
 // @grant        None
@@ -1709,7 +1709,7 @@
       }
 
       if (id === 'trh-set-apikey') {
-        promptDrugApiKey();
+        promptApiKey();
         return;
       }
 
@@ -1904,176 +1904,31 @@
     startTrainObserver();
   }
 
-  // ---- Drug cooldown alarm (all Torn pages, Torn-API driven) ----
-  // Reads cooldowns from api.torn.com only — never scrapes the page. Polls
-  // only while the tab is actively viewed (foreground + focused), per Torn
-  // rules, with a live local countdown between polls. Rendered as a fully
-  // self-contained styled floating pill (own id + namespaced classes), so no
-  // Torn styling can bleed into it.
-  const DRUG_POLL_MS = 60000;
-  const DRUG_ALARM_SEC = 300; // only show the alarm in the final 5 minutes
-  let drugApiKey      = store.get('trh_api_key', '');
-  let drugCooldownSec = null;   // last fetched remaining seconds (drug)
-  let drugFetchAt     = 0;      // Date.now() when last fetched
-  let drugLastError   = null;   // short error label, or null
-  let drugBadKeyHandled = false; // true once we've auto-prompted for a bad key
+  // ---- API key + gym-gain perks (Torn-API driven) ----
+  // Reads the player's gym-gain perks from api.torn.com only — never scrapes
+  // the page — to weight training gains by real multipliers. Runs only while
+  // the tab is actively viewed (per Torn rules), on load and when a key is
+  // (re)entered; perks change rarely (Steadfast is monthly), so no polling.
+  let apiKey = store.get('trh_api_key', '');
 
-  function fmtCooldown(sec) {
-    sec = Math.max(0, Math.floor(sec));
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = sec % 60;
-    if (h > 0) return h + 'h ' + m + 'm';
-    if (m > 0) return m + 'm ' + s + 's';
-    return s + 's';
-  }
-
-  function injectDrugAlarmStyle() {
-    if (document.getElementById('sf-drug-alarm-style')) return;
-    const s = document.createElement('style');
-    s.id = 'sf-drug-alarm-style';
-    s.textContent =
-      '#sf-drug-alarm{position:fixed;bottom:16px;left:16px;z-index:2147483000;' +
-      'display:flex;align-items:center;gap:14px;padding:16px 28px;border-radius:9999px;' +
-      'font:700 26px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
-      'color:#f1f2f4;background:#1d1f24;border:2px solid #34373f;' +
-      'box-shadow:0 6px 22px rgba(0,0,0,.45);cursor:pointer;user-select:none;' +
-      '-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .2s ease,border-color .2s ease;}' +
-      '#sf-drug-alarm:hover{transform:translateY(-1px);}' +
-      '#sf-drug-alarm .sf-dot{width:16px;height:16px;border-radius:50%;background:#ffb74d;flex:0 0 auto;}' +
-      '#sf-drug-alarm .sf-text{white-space:nowrap;}' +
-      '#sf-drug-alarm.sf-idle{opacity:.85;}#sf-drug-alarm.sf-idle .sf-dot{background:#9aa0aa;}' +
-      '#sf-drug-alarm.sf-err{background:#3a1d1d;border-color:#7a2e2e;color:#ffdada;}' +
-      '#sf-drug-alarm.sf-err .sf-dot{background:#ef5350;}' +
-      '#sf-drug-alarm.sf-alarm{background:#3a2a12;border-color:#b26a00;color:#ffd9a3;}' +
-      '#sf-drug-alarm.sf-alarm .sf-dot{background:#ffb74d;}' +
-      '#sf-drug-alarm.sf-ready{background:#15401d;border-color:#2e7d32;color:#e2f6e6;' +
-      'animation:sf-drug-blink 1s ease-in-out infinite;}' +
-      '#sf-drug-alarm.sf-ready .sf-dot{background:#66bb6a;}' +
-      '@keyframes sf-drug-blink{0%,100%{opacity:1;}50%{opacity:.2;}}';
-    (document.head || document.documentElement).appendChild(s);
-  }
-
-  function ensureDrugAlarm() {
-    let el = document.getElementById('sf-drug-alarm');
-    if (!el && document.body) {
-      el = document.createElement('div');
-      el.id = 'sf-drug-alarm';
-      const dot = document.createElement('span');
-      dot.className = 'sf-dot';
-      const txt = document.createElement('span');
-      txt.className = 'sf-text';
-      el.appendChild(dot);
-      el.appendChild(txt);
-      el.addEventListener('click', onDrugAlarmClick);
-      document.body.appendChild(el);
-    }
-    return el;
-  }
-
-  // Click: with a working key, jump to the Items page (to take a drug);
-  // otherwise (no key / key error) open the key prompt so it can be fixed.
-  function onDrugAlarmClick() {
-    if (drugApiKey && !drugLastError) {
-      window.location.href = 'https://www.torn.com/item.php';
-    } else {
-      promptDrugApiKey();
-    }
-  }
-
-  function paintDrugAlarm(el, stateClass, text, title) {
-    el.className = stateClass;
-    el.title = title;
-    const t = el.querySelector('.sf-text');
-    if (t) t.textContent = text;
-  }
-
-  function renderDrugAlarm() {
-    const el = ensureDrugAlarm();
-    if (!el) return;
-    // Set-key / error states stay visible so the alarm can be configured/fixed.
-    if (!drugApiKey) {
-      el.style.display = 'flex';
-      paintDrugAlarm(el, 'sf-idle', '💊 Set API key', 'StatForge — click to set your Torn API key');
-      return;
-    }
-    if (drugLastError) {
-      el.style.display = 'flex';
-      paintDrugAlarm(el, 'sf-err', '💊 ' + drugLastError, 'StatForge — API key problem; click to re-enter it');
-      return;
-    }
-    // No data yet, or more than 5 minutes left → stay hidden.
-    if (drugCooldownSec === null) { el.style.display = 'none'; return; }
-    const remaining = drugCooldownSec - Math.floor((Date.now() - drugFetchAt) / 1000);
-    if (remaining <= 0) {
-      el.style.display = 'flex';
-      paintDrugAlarm(el, 'sf-ready', '💊 Drug ready', 'StatForge — drug cooldown over; click to open Items');
-    } else if (remaining <= DRUG_ALARM_SEC) {
-      el.style.display = 'flex';
-      paintDrugAlarm(el, 'sf-alarm', '💊 ' + fmtCooldown(remaining), 'StatForge drug cooldown — click to open Items');
-    } else {
-      el.style.display = 'none';
-    }
-  }
-
-  function promptDrugApiKey() {
+  function promptApiKey() {
     const v = window.prompt(
-      'Enter your Torn API key (needs "cooldowns" access). Stored locally in your browser only.',
-      drugApiKey || '');
+      'Enter your Torn API key (needs "perks" access). Stored locally in your browser only.',
+      apiKey || '');
     if (v === null) return; // cancelled
-    drugApiKey = v.trim();
-    store.set('trh_api_key', drugApiKey);
-    drugLastError = null;
-    drugBadKeyHandled = false; // a freshly entered bad key may re-prompt
-    drugCooldownSec = null;
-    renderDrugAlarm();
-    fetchDrugCooldown();
+    apiKey = v.trim();
+    store.set('trh_api_key', apiKey);
     fetchGymMults();
   }
 
-  function fetchDrugCooldown() {
-    if (!drugApiKey || !isActivelyViewed()) return;
-    fetch('https://api.torn.com/user/?selections=cooldowns&key=' +
-          encodeURIComponent(drugApiKey) + '&comment=StatForge')
-      .then(r => r.json())
-      .then(data => {
-        if (data && data.error) {
-          const badKey = data.error.code === 2; // 2 = incorrect key
-          drugLastError = badKey ? 'Bad key' : 'API error';
-          renderDrugAlarm();
-          // An invalid key never recovers on its own — prompt once to re-enter
-          // it (guarded so we don't nag on every 60s poll). fetch only runs
-          // while actively viewed, so the prompt never fires in a background tab.
-          if (badKey && !drugBadKeyHandled) {
-            drugBadKeyHandled = true;
-            promptDrugApiKey();
-          }
-          return;
-        }
-        if (data && data.cooldowns && typeof data.cooldowns.drug === 'number') {
-          drugLastError = null;
-          drugBadKeyHandled = false;
-          drugCooldownSec = data.cooldowns.drug;
-          drugFetchAt = Date.now();
-        } else {
-          drugLastError = 'API error';
-        }
-        renderDrugAlarm();
-      })
-      .catch(() => { drugLastError = 'Net error'; renderDrugAlarm(); });
-  }
-
-  // Fetch the player's gym-gain perks once and cache the per-stat multipliers.
-  // Reuses the same key the drug alarm uses. Perks change rarely (Steadfast is
-  // monthly), so this only runs on load and when a key is (re)entered — not on
-  // the polling interval. Reads only api.torn.com; never scrapes the page.
+  // Fetch the player's gym-gain perks and cache the per-stat multipliers.
   function fetchGymMults() {
-    if (!drugApiKey || !isActivelyViewed()) return;
+    if (!apiKey || !isActivelyViewed()) return;
     fetch('https://api.torn.com/user/?selections=perks&key=' +
-          encodeURIComponent(drugApiKey) + '&comment=StatForge')
+          encodeURIComponent(apiKey) + '&comment=StatForge')
       .then(r => r.json())
       .then(data => {
-        if (!data || data.error) return; // bad key is handled by the drug flow
+        if (!data || data.error) return;
         gymMults = parseGymMultsFromPerks(data);
         gymMultsFetchedAt = Date.now();
         store.set('trh_gym_mults', gymMults);
@@ -2087,19 +1942,11 @@
       .catch(() => {});
   }
 
-  function initDrugCooldown() {
-    if (!document.body) { setTimeout(initDrugCooldown, 300); return; }
-    injectDrugAlarmStyle();
-    ensureDrugAlarm();
-    renderDrugAlarm();
-    fetchDrugCooldown();
+  function initPerks() {
+    if (!document.body) { setTimeout(initPerks, 300); return; }
     fetchGymMults();
-    setInterval(() => { if (isActivelyViewed()) fetchDrugCooldown(); }, DRUG_POLL_MS);
-    setInterval(renderDrugAlarm, 1000); // live local countdown + self-heal
-    document.addEventListener('visibilitychange', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
-    window.addEventListener('focus', () => { if (isActivelyViewed()) fetchDrugCooldown(); });
   }
-  initDrugCooldown();
+  initPerks();
 
   function resumeIfActive() {
     if (!isActivelyViewed() || !isGymPage()) return;
