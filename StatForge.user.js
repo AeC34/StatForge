@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.18.0
+// @version      1.18.1
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -1023,8 +1023,9 @@
   // Headroom raises are sticky: raising the high stat by a single rep opens only
   // a sliver of room and would flip the pick straight back to the best stat, so
   // once we start a raise we keep training the high stat until it is HEADROOM_STEP
-  // (5%) above where it was when the best stat capped — opening ~5% more headroom
-  // each time before we resume riding the best stat.
+  // (8%) above where it was when the best stat capped — opening ~8% more headroom
+  // each time before we resume riding the best stat. A bigger step opens more
+  // room per unlock, so the best stat can be ridden longer between gym switches.
   //
   // Fail-safe: because we keep raising the high stat, every other stat's cap
   // keeps rising and a neglected stat would drift ever further below ratio. So
@@ -1034,7 +1035,7 @@
   // though "best yield" never rotates on its own.
   function recommendStat(stats, roles, targets) {
     const FAILSAFE_PCT = 0.80;  // catch a stat up once it drops below 80% of its cap
-    const HEADROOM_STEP = 0.05; // raise the high stat 5% per headroom unlock
+    const HEADROOM_STEP = 0.08; // raise the high stat 8% per headroom unlock
     const trained = [];
     for (const k of Object.keys(STAT_LABELS)) {
       if (k === highStat) continue;
@@ -1064,10 +1065,10 @@
     }
     if (failSafeStat) { recReason = 'failsafe'; return failSafeStat; }
 
-    // --- HEADROOM RAISE (sticky): keep training high until it is +5% from base ---
+    // --- HEADROOM RAISE (sticky): keep training high until it is +8% from base ---
     const high = stats[highStat] || 0;
     if (headroomBaseHigh) {
-      if (high >= headroomBaseHigh * (1 + HEADROOM_STEP)) headroomBaseHigh = null; // reached +5%
+      if (high >= headroomBaseHigh * (1 + HEADROOM_STEP)) headroomBaseHigh = null; // reached +8%
       else { recReason = 'headroom'; return highStat; }
     }
 
@@ -1077,7 +1078,7 @@
     const best = pool.reduce((a, b) => (b.yld > a.yld ? b : a));
     if (best.room) { recReason = 'best'; return best.k; } // train the best stat
 
-    // Best stat is capped -> start a 5% high-stat raise to open more headroom.
+    // Best stat is capped -> start an 8% high-stat raise to open more headroom.
     headroomBaseHigh = high;
     recReason = 'headroom';
     return highStat;
