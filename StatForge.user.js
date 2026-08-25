@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.18.1
+// @version      1.18.2
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -43,6 +43,12 @@
   // API, so the rep plan still works for users without a key.
   let gymMults       = store.get('trh_gym_mults', { str: 1, spd: 1, def: 1, dex: 1 });
   let gymMultsFetchedAt = store.get('trh_gym_mults_at', 0);
+  // Why the last fetch failed, or null when the cached multipliers are trustworthy.
+  // Deliberately NOT persisted: a stored error would outlive the condition that
+  // caused it and accuse a key that has since been fixed. Kept in memory so the
+  // panel can say "these numbers are stale, and here is why" instead of showing
+  // month-old multipliers as if they were current.
+  let gymMultsError  = null;
   let theme          = store.get('trh_theme', 'dark');
   let collapseRepPlan = store.get('trh_collapse_repplan', true);
   let collapseStats   = store.get('trh_collapse_stats', true);
@@ -1472,6 +1478,9 @@
         <div style="font-size:10px;color:#666;margin-top:4px">
           ${gymMultsFetchedAt ? 'Last updated: ' + new Date(gymMultsFetchedAt).toLocaleString() : 'Not fetched yet — set a key and refresh.'}
         </div>
+        ${gymMultsError ? `<div class="trh-warn" style="margin-top:6px;margin-bottom:0">
+          Could not refresh the multipliers: ${escapeHtml(gymMultsError)}${gymMultsFetchedAt ? ' — the values above are the last ones that arrived, so the rep plan may be weighting the wrong stat.' : ' — the rep plan is running on 1.0 for every stat.'}
+        </div>` : ''}
         <div class="trh-ctrl-row" style="margin-top:8px">
           <button class="trh-btn" id="trh-set-apikey">Set API key</button>
           <button class="trh-btn" id="trh-refresh-mults">Refresh now</button>
@@ -1922,25 +1931,60 @@
     fetchGymMults();
   }
 
+  // Re-render the gym panel, if it is the thing currently on screen. Used after
+  // a multiplier fetch settles either way — success changes the numbers, failure
+  // changes the status line, and both need to reach the user.
+  function refreshGymPanelIfVisible() {
+    if (typeof isGymPage === 'function' && isGymPage()
+        && document.getElementById('trh-wrapper')) {
+      injectPanel();
+    }
+  }
+
   // Fetch the player's gym-gain perks and cache the per-stat multipliers.
+  //
+  // Every failure path sets gymMultsError. Swallowing them (the previous
+  // behaviour) meant a revoked key, a key without the perks selection, or Torn
+  // being down all looked identical to success: the rep plan silently kept
+  // weighting stats by whatever multipliers were last cached — or by 1.0 if none
+  // ever were — and the panel showed a stale "Last updated" date as if current.
   function fetchGymMults() {
     if (!apiKey || !isActivelyViewed()) return;
     fetch('https://api.torn.com/user/?selections=perks&key=' +
           encodeURIComponent(apiKey) + '&comment=StatForge')
-      .then(r => r.json())
+      .then(r => {
+        // A non-2xx never rejects on its own, and an error page is not JSON —
+        // check the status before asking for a body.
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' from the Torn API');
+        return r.json();
+      })
       .then(data => {
-        if (!data || data.error) return;
+        if (!data) throw new Error('Empty response from the Torn API');
+        // Torn reports failures in the body with a 200, so this is the branch
+        // that catches a dead key (2), a paused key (18) or a key lacking the
+        // access level for `perks` (16). Quote Torn's own wording — it is more
+        // specific than anything this script could infer.
+        if (data.error) {
+          throw new Error('Torn API error ' + data.error.code + ': ' + data.error.error);
+        }
         gymMults = parseGymMultsFromPerks(data);
         gymMultsFetchedAt = Date.now();
+        gymMultsError = null;
         store.set('trh_gym_mults', gymMults);
         store.set('trh_gym_mults_at', gymMultsFetchedAt);
         // Refresh the gym panel so the rep plan reflects the new multipliers.
-        if (typeof isGymPage === 'function' && isGymPage()
-            && document.getElementById('trh-wrapper')) {
-          injectPanel();
-        }
+        refreshGymPanelIfVisible();
       })
-      .catch(() => {});
+      .catch(err => {
+        let msg = (err && err.message) ? err.message : String(err);
+        // The key rides in the query string, and some engines quote the whole
+        // failing URL back in the error text. This message is rendered into the
+        // panel, so redact the key rather than putting it on screen where a
+        // screenshot would leak it.
+        if (apiKey) msg = msg.split(apiKey).join('[key]');
+        gymMultsError = msg;
+        refreshGymPanelIfVisible();
+      });
   }
 
   function initPerks() {
