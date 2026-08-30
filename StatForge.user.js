@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.18.2
+// @version      1.18.3
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -1017,14 +1017,15 @@
 
   // Train Next recommendation (Steadfast-aware, ratio-targeted).
   //
-  // Strategy: ride the single highest-yield stat (best-gym dots x your gym-gain
-  // multiplier) for as long as possible. When that stat reaches its ratio cap
-  // it can't be trained further without breaking the ratio, so instead of
-  // draining energy into a lower-yield stat we train the HIGH stat — which
-  // lifts every cap and re-opens headroom for the best stat. So the loop is:
-  // train best -> best hits cap -> bump high to open room -> train best again.
-  // The dump slot (roles.tert2, e.g. aec3 Dex) is never "ridden" this way; it
-  // only gets topped up by the fail-safe below.
+  // Strategy: ride the highest-yield stat (best-gym dots x your gym-gain
+  // multiplier) that still has room under its ratio target. When it reaches
+  // its cap it can't be trained further without breaking the ratio, so we
+  // fall through to the next-highest-yield stat that still has room — only
+  // once NO trained stat has room do we train the HIGH stat instead, which
+  // lifts every cap and re-opens headroom. So the loop is: ride best -> best
+  // caps -> ride next-best -> ... -> all capped -> bump high to open room ->
+  // ride best again. The dump slot (roles.tert2, e.g. aec3 Dex) is never
+  // "ridden" this way; it only gets topped up by the fail-safe below.
   //
   // Headroom raises are sticky: raising the high stat by a single rep opens only
   // a sliver of room and would flip the pick straight back to the best stat, so
@@ -1079,12 +1080,21 @@
     }
 
     // --- RIDE THE BEST STAT (the dump slot is excluded from riding) ---
+    // Pick the highest-yield stat that still has room, not the highest-yield
+    // stat overall — otherwise a higher-yield stat sitting at its cap blocks a
+    // lower-yield stat from ever being ridden (it would fall through straight
+    // to a headroom raise instead), leaving that stat parked at the fail-safe
+    // floor indefinitely even though it still has room under its own target.
     const rideable = trained.filter(c => c.k !== roles.tert2);
     const pool = rideable.length ? rideable : trained;
-    const best = pool.reduce((a, b) => (b.yld > a.yld ? b : a));
-    if (best.room) { recReason = 'best'; return best.k; } // train the best stat
+    const trainable = pool.filter(c => c.room);
+    if (trainable.length) {
+      const best = trainable.reduce((a, b) => (b.yld > a.yld ? b : a));
+      recReason = 'best';
+      return best.k;
+    }
 
-    // Best stat is capped -> start an 8% high-stat raise to open more headroom.
+    // No rideable stat has room -> start an 8% high-stat raise to open more headroom.
     headroomBaseHigh = high;
     recReason = 'headroom';
     return highStat;
