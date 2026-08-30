@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.18.3
+// @version      1.18.4
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -1039,9 +1039,9 @@
   // whenever any trained stat falls below FAILSAFE_PCT of its cap it becomes
   // top priority and is trained back up to its cap (sticky via failSafeStat)
   // before we resume the strategy. This guarantees everything gets trained even
-  // though "best yield" never rotates on its own.
+  // when a lower-yield stat never becomes the highest-yield rideable pick.
   function recommendStat(stats, roles, targets) {
-    const FAILSAFE_PCT = 0.80;  // catch a stat up once it drops below 80% of its cap
+    const FAILSAFE_PCT = 0.92;  // catch a stat up once it drops below 92% of its cap (max 8% lag)
     const HEADROOM_STEP = 0.08; // raise the high stat 8% per headroom unlock
     const trained = [];
     for (const k of Object.keys(STAT_LABELS)) {
