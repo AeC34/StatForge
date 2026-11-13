@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      1.18.4
+// @version      2.0.0
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -49,10 +49,12 @@
   // panel can say "these numbers are stale, and here is why" instead of showing
   // month-old multipliers as if they were current.
   let gymMultsError  = null;
-  let theme          = store.get('trh_theme', 'dark');
-  let collapseRepPlan = store.get('trh_collapse_repplan', true);
-  let collapseStats   = store.get('trh_collapse_stats', true);
-  let activeTab      = 'overview';
+  // Custom ratio exactly as the user typed it (e.g. [1.25, 1, 0.75, 0.75]);
+  // customMults holds the same ratio normalised to the 1st stat.
+  let customRaw      = store.get('trh_custom_raw', null);
+  // Which closed-by-default sections the user has opened (id -> true).
+  let openSections   = store.get('trh_open', {});
+  let showAllHistory = false;
 
   // Ratio definitions
   const RATIOS = {
@@ -60,18 +62,21 @@
       label: "Baldr's Ratio",
       short: "Baldr's",
       desc:  "High : 80% : 60% : 60%",
+      raw:   [1.25, 1, 0.75, 0.75],
       multipliers: { high: 1.00, secondary: 0.80, tert1: 0.60, tert2: 0.60 },
     },
     hank: {
       label: "Hank's Ratio",
       short: "Hank's",
       desc:  "High : 80% : 80% : ~0%",
+      raw:   [1.25, 1, 1, 0],
       multipliers: { high: 1.00, secondary: 0.80, tert1: 0.80, tert2: 0.00 },
     },
     aec3: {
       label: "Aec3 Ratio",
       short: "Aec3",
       desc:  "High : 78% : 78% : 14%",
+      raw:   [37, 29, 29, 5],
       forcedDump: 'dex',
       multipliers: { high: 1.00, secondary: 0.7838, tert1: 0.7838, tert2: 0.1351 },
     },
@@ -80,6 +85,9 @@
       short: "Custom",
       desc:  "Your own multipliers",
       get multipliers() { return customMults; },
+      get raw() {
+        return customRaw || [1, customMults.secondary, customMults.tert1, customMults.tert2];
+      },
     },
   };
 
@@ -100,7 +108,6 @@
   let failSafeStat = null;
   let headroomBaseHigh = null;
   let recReason = '';
-  const STAT_COLORS  = { str: '#f97316', spd: '#22d3ee', def: '#a78bfa', dex: '#4ade80' };
 
   // Gym dots per stat, keyed by Torn gym id.
   // Data ported from stephenlynx/autogymswitch (MIT licensed).
@@ -409,146 +416,135 @@
     store.set('trh_history', history);
   }
 
-  // CSS
+  // CSS — "calm" look shared with Dossier: one answer card, a few numbers,
+  // everything else in closed sections. Colours follow Torn's own theme
+  // (body.dark-mode); colour is only used for direction (+/-) and warnings,
+  // stats are identified by a small dot.
   const CSS = `
-    #trh-root * { box-sizing: border-box; }
     #trh-root {
-      font-family: Arial, sans-serif;
-      background: #191919;
-      border: 1px solid #000;
-      border-top: 3px solid #74c0fc;
-      border-radius: 4px;
-      padding: 0;
-      margin: 14px 0;
-      max-width: 600px;
-      box-shadow: 0 0 20px rgba(255,204,0,0.06), 0 4px 16px rgba(0,0,0,0.7);
-      color: #dddddd;
-      overflow: visible;
+      --sf-bg: #ffffff; --sf-card: #ffffff; --sf-fg: #1c2330; --sf-dim: #656d76;
+      --sf-line: #d0d7de; --sf-soft: #f2f4f7; --sf-primary: #107569; --sf-primary-fg: #ffffff;
+      --sf-pos: #107569; --sf-neg: #c81e3f; --sf-warn: #9a6700; --sf-ring: #0969da;
+      --sf-str: #0969da; --sf-spd: #bc4c00; --sf-dex: #00866b; --sf-def: #9c2f8a;
+    }
+    #trh-root.trh-dark {
+      --sf-bg: #131924; --sf-card: #1c2432; --sf-fg: #d9e0e8; --sf-dim: #a7b2c0;
+      --sf-line: #3d4a5a; --sf-soft: #253040; --sf-primary: #34d399; --sf-primary-fg: #131924;
+      --sf-pos: #34d399; --sf-neg: #fb5c73; --sf-warn: #d29922; --sf-ring: #58a6ff;
+      --sf-str: #3987e5; --sf-spd: #d95926; --sf-dex: #199e70; --sf-def: #c855b8;
+    }
+    #trh-root, #trh-root * { box-sizing: border-box; }
+    #trh-root [hidden] { display: none !important; }
+    #trh-root {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      font-size: 14px; line-height: 1.4; color: var(--sf-fg); background: var(--sf-bg);
+      border: 1px solid var(--sf-line); border-radius: 10px; margin: 14px 0; max-width: 600px;
+      overflow: hidden; text-align: left;
+    }
+    #trh-root button {
+      font: inherit; appearance: none; -webkit-appearance: none; cursor: pointer;
+      text-transform: none; letter-spacing: normal; margin: 0;
+    }
+    #trh-root button:focus-visible, #trh-root summary:focus-visible, #trh-root input:focus-visible {
+      outline: 2px solid var(--sf-ring); outline-offset: 2px;
     }
     #trh-header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 10px 14px;
-      background: #111;
-      border-bottom: 1px solid #000;
-      border-radius: 4px 4px 0 0;
-      overflow: hidden;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+      padding: 10px 16px; border-bottom: 1px solid var(--sf-line);
     }
-    #trh-title { font-size: 13px; font-weight: 700; color: #74c0fc; letter-spacing: 2px; text-transform: uppercase; }
-    #trh-tabs { display: flex; gap: 1px; background: #111; border-bottom: 1px solid #000; padding-left: 10px; overflow-x: auto; scrollbar-width: none; }
-    #trh-tabs::-webkit-scrollbar { display: none; }
-    .trh-tab {
-      flex: 0 0 auto; padding: 8px 14px; font-size: 11px; font-family: Arial, sans-serif;
-      text-align: center; cursor: pointer; color: #888; background: #191919;
-      border: none; text-transform: uppercase; letter-spacing: 1px;
-      transition: all 0.15s; border-bottom: 2px solid transparent; white-space: nowrap;
+    #trh-title { font-weight: 600; font-size: 14px; }
+    .trh-ctx { font-size: 12px; color: var(--sf-dim); text-align: right; }
+    #trh-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+    .trh-eyebrow { font-size: 12px; color: var(--sf-dim); }
+    .trh-dim { color: var(--sf-dim); }
+    .trh-pos { color: var(--sf-pos); }
+    .trh-neg { color: var(--sf-neg); }
+    .trh-warntext { color: var(--sf-warn); }
+    .trh-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+    .trh-dot-str { background: var(--sf-str); } .trh-dot-spd { background: var(--sf-spd); }
+    .trh-dot-def { background: var(--sf-def); } .trh-dot-dex { background: var(--sf-dex); }
+
+    .trh-answer {
+      background: var(--sf-card); border-radius: 10px; padding: 12px 16px;
+      border: 1px solid color-mix(in srgb, var(--sf-primary) 45%, var(--sf-line));
+      display: flex; flex-direction: column; gap: 6px;
     }
-    .trh-tab:hover { color: #ddd; background: #222; }
-    .trh-tab.active { color: #74c0fc; border-bottom: 2px solid #74c0fc; background: #222; }
-    #trh-body { padding: 14px; }
-    .trh-section { margin-bottom: 14px; }
-    .trh-label { font-size: 10px; color: #777; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; }
-    .trh-stat-row { margin-bottom: 10px; }
-    .trh-stat-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-    .trh-stat-name { font-size: 12px; font-weight: 700; letter-spacing: 1px; }
-    .trh-stat-nums { font-size: 11px; color: #888; }
-    .trh-stat-nums span { color: #ddd; }
-    .trh-bar-bg { height: 6px; background: #2a2a2a; border-radius: 3px; overflow: hidden; }
-    .trh-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
-    .trh-stat-status { font-size: 10px; margin-top: 3px; }
-    .trh-grade { font-size: 28px; font-weight: 900; line-height: 1; font-family: Arial, sans-serif; }
-    .trh-score-row { display: flex; align-items: center; gap: 14px; }
-    .trh-score-detail { font-size: 11px; color: #888; }
-    .trh-score-detail strong { color: #ddd; }
-    .trh-rec-box {
-      background: #222; border: 1px solid #333; border-left: 3px solid #74c0fc;
-      border-radius: 4px; padding: 10px 12px; font-size: 12px;
+    .trh-verb { font-size: 24px; font-weight: 600; line-height: 1.2; display: flex; align-items: center; gap: 8px; }
+    .trh-verb .trh-dot { width: 10px; height: 10px; }
+    .trh-facts { font-size: 15px; line-height: 1.45; font-variant-numeric: tabular-nums; }
+    .trh-marks { display: flex; flex-wrap: wrap; gap: 6px; }
+    .trh-mark { font-size: 12px; border: 1px solid var(--sf-warn); color: var(--sf-warn); border-radius: 999px; padding: 1px 8px; }
+    #trh-root .trh-go {
+      margin-top: 4px; font-weight: 600; font-size: 15px; min-height: 44px; padding: 11px 14px;
+      background: var(--sf-primary); color: var(--sf-primary-fg); border: 0; border-radius: 8px; width: 100%;
     }
-    .trh-rec-box .trh-rec-stat { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
-    .trh-ctrl-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    .trh-btn {
-      background: #2a2a2a; border: 1px solid #444; color: #ddd;
-      border-radius: 3px; padding: 5px 10px; font-size: 11px; cursor: pointer;
-      font-family: Arial, sans-serif; letter-spacing: 1px;
-      transition: all 0.15s; text-transform: uppercase; white-space: nowrap;
+    .trh-prov { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--sf-dim); }
+
+    .trh-keys { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .trh-tile { border: 1px solid var(--sf-line); border-radius: 10px; padding: 10px 12px; background: var(--sf-card); min-width: 0; }
+    .trh-tile-v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .trh-tile-s { font-size: 12px; color: var(--sf-dim); margin-top: 2px; }
+    @media (max-width: 380px) { .trh-tile { padding: 8px 10px; } .trh-tile-v { font-size: 17px; } }
+
+    #trh-root details { border: 1px solid var(--sf-line); border-radius: 10px; background: var(--sf-card); }
+    #trh-root summary {
+      list-style: none; display: flex; align-items: center; gap: 10px; min-height: 48px;
+      padding: 0 14px; cursor: pointer; user-select: none;
     }
-    .trh-btn:hover { background: #333; border-color: #74c0fc; color: #74c0fc; }
-    .trh-btn.active { background: #1a2840; border-color: #74c0fc; color: #74c0fc; }
-    @media (max-width: 480px) {
-      .trh-ctrl-row { flex-direction: column; align-items: stretch; }
-      .trh-btn { text-align: center; width: 100%; }
-      .trh-custom-grid { grid-template-columns: 1fr; }
+    #trh-root summary::-webkit-details-marker { display: none; }
+    #trh-root summary::before {
+      content: ""; width: 6px; height: 6px; flex: none; transform: rotate(-45deg);
+      border-right: 1.5px solid var(--sf-dim); border-bottom: 1.5px solid var(--sf-dim);
     }
-    .trh-select {
-      background: #2a2a2a; border: 1px solid #444; color: #ddd;
-      border-radius: 3px; padding: 5px 8px; font-size: 11px; cursor: pointer;
-      font-family: Arial, sans-serif;
+    #trh-root details[open] > summary::before { transform: rotate(45deg); }
+    .trh-st { font-weight: 600; }
+    .trh-sm { margin-left: auto; font-size: 12px; color: var(--sf-dim); text-align: right; }
+    .trh-inner { padding: 2px 14px 12px; display: flex; flex-direction: column; }
+
+    .trh-row {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      padding: 6px 0; border-bottom: 1px solid var(--sf-line); font-variant-numeric: tabular-nums;
     }
-    .trh-history-row { display: flex; gap: 6px; align-items: center; font-size: 11px; padding: 5px 0; border-bottom: 1px solid #2a2a2a; }
-    .trh-history-date { color: #777; width: 60px; flex-shrink: 0; }
-    .trh-history-stat { flex: 1; text-align: right; }
-    .trh-history-delta { font-size: 10px; }
-    .trh-slot-row { display: flex; align-items: center; gap: 10px; padding: 5px 8px; background: #222; border-radius: 4px; margin-bottom: 4px; font-size: 12px; }
-    .trh-slot-label { color: #777; width: 110px; flex-shrink: 0; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-    .trh-slot-mult { color: #888; font-size: 11px; }
-    .trh-custom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .trh-custom-field { display: flex; flex-direction: column; gap: 3px; }
-    .trh-custom-field label { font-size: 10px; color: #777; letter-spacing: 1px; text-transform: uppercase; }
-    .trh-custom-field input {
-      background: #2a2a2a; border: 1px solid #444; color: #dddddd;
-      border-radius: 3px; padding: 6px 8px; font-size: 12px; width: 100%;
-      font-family: Arial, sans-serif;
+    .trh-row:last-child { border-bottom: 0; }
+    .trh-row-l { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+    .trh-row-r { text-align: right; white-space: nowrap; }
+    .trh-sub { font-size: 12px; color: var(--sf-dim); }
+    .trh-statcol { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+    .trh-bar { height: 4px; background: var(--sf-soft); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+    .trh-bar i { display: block; height: 100%; background: var(--sf-dim); border-radius: 2px; }
+
+    .trh-lbl { font-size: 12px; color: var(--sf-dim); padding-top: 10px; }
+    .trh-ctl { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0; }
+    #trh-root .trh-btn {
+      font-size: 13px; padding: 6px 10px; min-height: 36px; border-radius: 6px;
+      border: 1px solid var(--sf-line); background: transparent; color: var(--sf-fg);
     }
-    .trh-custom-field input:focus { outline: none; border-color: #74c0fc; }
-    .trh-tbs { font-size: 22px; font-weight: 700; color: #74c0fc; letter-spacing: -1px; }
-    .trh-tbs-label { font-size: 10px; color: #777; letter-spacing: 2px; text-transform: uppercase; margin-top: 2px; }
-    .trh-divider { border: none; border-top: 1px solid #2a2a2a; margin: 12px 0; }
-    .trh-warn { font-size: 11px; color: #facc15; padding: 6px 10px; background: #2a1e00; border-radius: 3px; margin-bottom: 10px; border: 1px solid #4a3800; }
-    .trh-no-history { font-size: 12px; color: #777; text-align: center; padding: 20px; }
-    .trh-drift-alert {
-      font-size: 11px; color: #fb923c; padding: 6px 10px;
-      background: #2a1600; border-radius: 3px; margin-bottom: 10px;
-      border: 1px solid #4a2800;
+    #trh-root .trh-btn.active { border-color: var(--sf-primary); color: var(--sf-primary); font-weight: 600; }
+    #trh-root .trh-btn:hover { border-color: var(--sf-dim); }
+
+    .trh-cgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 4px; }
+    .trh-cf { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--sf-dim); }
+    .trh-cf span { display: flex; align-items: center; gap: 6px; }
+    #trh-root .trh-cf input {
+      font: inherit; font-size: 14px; padding: 7px 9px; width: 100%; border-radius: 6px;
+      border: 1px solid var(--sf-line); background: var(--sf-bg); color: var(--sf-fg);
+      font-variant-numeric: tabular-nums;
     }
+
+    .trh-htable { overflow-x: auto; }
+    .trh-htable table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .trh-htable th, .trh-htable td { padding: 5px 4px; text-align: right; border-bottom: 1px solid var(--sf-line); white-space: nowrap; }
+    .trh-htable th:first-child, .trh-htable td:first-child { text-align: left; }
+    .trh-htable th { font-weight: 400; color: var(--sf-dim); }
     .trh-export-box {
-      background: #222; border: 1px solid #333; border-radius: 3px;
-      padding: 10px; font-size: 11px; color: #aaa; font-family: Arial, sans-serif;
-      white-space: pre; overflow-x: auto; margin-top: 8px; line-height: 1.6;
+      font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre; overflow-x: auto;
+      background: var(--sf-soft); border-radius: 6px; padding: 10px; margin: 6px 0 0; color: var(--sf-fg);
     }
-    #trh-root.trh-light {
-      background: #cccccc; border-color: #bbb; border-top-color: #74c0fc;
-      box-shadow: 0 0 20px rgba(116,192,252,0.06), 0 2px 10px rgba(0,0,0,0.12); color: #333333;
-    }
-    #trh-root.trh-light #trh-header { background: #b6b6b6; border-bottom-color: #999; }
-    #trh-root.trh-light #trh-title { color: #74c0fc; }
-    #trh-root.trh-light #trh-tabs { background: #b6b6b6; border-bottom-color: #999; }
-    #trh-root.trh-light .trh-tab { color: #666; background: #cccccc; }
-    #trh-root.trh-light .trh-tab:hover { color: #333; background: #d5d5d5; }
-    #trh-root.trh-light .trh-tab.active { color: #74c0fc; border-bottom-color: #74c0fc; background: #d6ecfe; }
-    #trh-root.trh-light .trh-label { color: #666; }
-    #trh-root.trh-light .trh-divider { border-top-color: #999; }
-    #trh-root.trh-light .trh-btn { background: #d5d5d5; border-color: #999; color: #333; }
-    #trh-root.trh-light .trh-btn:hover { background: #c5c5c5; border-color: #74c0fc; color: #0066a8; }
-    #trh-root.trh-light .trh-btn.active { background: #d6ecfe; border-color: #74c0fc; color: #0066a8; }
-    #trh-root.trh-light .trh-bar-bg { background: #a0a0a0; }
-    #trh-root.trh-light .trh-rec-box { background: #dddddd; border-color: #999; }
-    #trh-root.trh-light .trh-score-detail { color: #666; }
-    #trh-root.trh-light .trh-score-detail strong { color: #333333; }
-    #trh-root.trh-light .trh-stat-nums { color: #666; }
-    #trh-root.trh-light .trh-stat-nums span { color: #333333; }
-    #trh-root.trh-light .trh-export-box { background: #dddddd; border-color: #999; color: #555; }
-    #trh-root.trh-light .trh-tbs { color: #74c0fc; }
-    #trh-root.trh-light .trh-no-history { color: #666; }
-    #trh-root.trh-light .trh-slot-row { background: #dddddd; }
-    #trh-root.trh-light .trh-slot-label { color: #666; }
-    #trh-root.trh-light .trh-slot-mult { color: #555; }
-    #trh-root.trh-light .trh-warn { background: #fff8e1; color: #7a5c00; border-color: #e6d28a; }
-    #trh-root.trh-light .trh-drift-alert { background: #fff2e0; color: #8a4a00; border-color: #e6b87a; }
-    #trh-root.trh-light .trh-history-date { color: #888; }
-    #trh-root.trh-light .trh-history-row { border-bottom-color: #ddd; }
-    #trh-root.trh-light .trh-custom-field input {
-      background: #fff; border-color: #999; color: #333333;
-    }
-    #trh-root.trh-light .trh-custom-field input:focus { border-color: #74c0fc; }
+    .trh-prose { font-size: 13px; line-height: 1.55; max-width: 62ch; }
+    .trh-prose p { margin: 6px 0; }
+    .trh-prose h4 { font-size: 13px; font-weight: 600; margin: 12px 0 2px; }
+    .trh-prose b { font-weight: 600; }
   `;
 
   // Feature helpers
@@ -1138,491 +1134,284 @@
     ].join('\n');
   }
 
-  // Render tabs
+  // Render — one page, no tabs:
+  //   answer card (Train Next) -> 3 key numbers -> closed sections.
+  // Section open/closed state persists in trh_open.
 
-  function renderOverview(stats, targets, roles, ratio) {
+  const statDot = (k) => `<span class="trh-dot trh-dot-${k}"></span>`;
+  const fmtRatioNum = (n) => String(Math.round((Number(n) || 0) * 10000) / 10000);
+  const tbsOf = (s) => Object.keys(STAT_LABELS).reduce((a, k) => a + ((s && s[k]) || 0), 0);
+
+  function section(id, title, summary, inner, summaryClass) {
+    return `
+      <details data-trh-sec="${id}"${openSections[id] ? ' open' : ''}>
+        <summary><span class="trh-st">${title}</span><span class="trh-sm${summaryClass ? ' ' + summaryClass : ''}">${summary}</span></summary>
+        <div class="trh-inner">${inner}</div>
+      </details>`;
+  }
+
+  function renderAnswer(stats, targets, roles) {
     const rec = recommendStat(stats, roles, targets);
-
-    const grade = overallGrade(stats, targets, roles, selectedRatio);
-    const tbs = Object.values(stats).reduce((a, v) => a + (v || 0), 0);
     const allFound = Object.values(stats).every(v => v !== null);
-    const driftWarnings = getDriftWarnings(stats, targets, roles);
-    const gradeColor = grade.score >= 90 ? '#4ade80' : grade.score >= 75 ? '#facc15' : '#f87171';
-
-    const statRows = Object.entries(STAT_LABELS).map(([key, label]) => {
-      const actual  = stats[key] || 0;
-      const target  = targets[key] || 0;
-      const isDump  = isStatDumped(key, selectedRatio, roles);
-      const isHigh  = roles.high === key;
-      const is2nd   = roles.secondary === key;
-      const is3rd   = roles.tert1 === key;
-      const status  = getStatus(actual, target, isDump);
-      const pct     = isDump ? 0 : (target > 0 ? Math.min((actual / target) * 100, 115) : 0);
-      const diff    = Math.round(target - actual);
-      const diffStr = isDump ? '<span style="color:#888">minimize</span>'
-                    : diff > 0 ? `<span style="color:#f87171">+${fmtNum(diff)} needed</span>`
-                    : diff < 0 ? `<span style="color:#fb923c">${fmtNum(Math.abs(diff))} over</span>`
-                    : `<span style="color:#4ade80">perfect</span>`;
-
-      const roleBadge = isHigh ? '<span style="font-size:9px;color:#74c0fc;letter-spacing:1px;margin-left:4px">1ST</span>'
-                      : is2nd  ? '<span style="font-size:9px;color:#ddd;letter-spacing:1px;margin-left:4px">2ND</span>'
-                      : is3rd  ? '<span style="font-size:9px;color:#888;letter-spacing:1px;margin-left:4px">3RD</span>'
-                      :          '<span style="font-size:9px;color:#f87171;letter-spacing:1px;margin-left:4px">DUMP</span>';
-
-      return `
-        <div class="trh-stat-row">
-          <div class="trh-stat-top">
-            <div class="trh-stat-name" style="color:${STAT_COLORS[key]}">
-              ${label}${roleBadge}
-            </div>
-            <div class="trh-stat-nums">
-              <span>${fmtNum(actual)}</span> / ${fmtNum(Math.round(target))}
-              &nbsp;<span style="color:${status.color}">${status.grade}</span>
-            </div>
-          </div>
-          <div class="trh-bar-bg">
-            <div class="trh-bar-fill" style="width:${Math.min(pct, 100)}%;background:${status.color};${pct > 105 ? 'box-shadow:0 0 6px '+status.color : ''}"></div>
-          </div>
-          <div class="trh-stat-status" style="color:${status.color}">${status.emoji} ${status.label} - ${diffStr}</div>
-        </div>`;
-    }).join('');
-
-    const lastEntry = history.length >= 2 ? history[history.length - 2] : null;
-    const statKeys = Object.keys(STAT_LABELS);
-    const tbsDelta = lastEntry ? tbs - statKeys.reduce((a, k) => a + (lastEntry[k] || 0), 0) : null;
-
-    return `
-      ${!allFound ? '<div class="trh-warn">Warning: Some stats could not be read from this page. Try refreshing.</div>' : ''}
-      ${driftWarnings.map(w => `<div class="trh-drift-alert">Drift: <strong>${STAT_LABELS[w.key]}</strong> was ${Math.round(w.prevPct*100)}% of target, now ${Math.round(w.currPct*100)}%. Consider rebalancing.</div>`).join('')}
-
-      <div class="trh-section">
-        <div style="display:flex;gap:16px;align-items:flex-start;justify-content:space-between">
-          <div>
-            <div class="trh-label">Ratio Health</div>
-            <div class="trh-score-row">
-              <div class="trh-grade" style="color:${gradeColor}">${grade.letter}</div>
-              <div class="trh-score-detail">
-                <div><strong>${grade.score}%</strong> in ratio</div>
-                <div style="margin-top:2px">${RATIOS[selectedRatio].label}</div>
-              </div>
-            </div>
-          </div>
-          <div style="text-align:right">
-            <div class="trh-label">Total Battle Stats</div>
-            <div class="trh-tbs">${fmtNum(tbs)}</div>
-            ${tbsDelta !== null ? `<div class="trh-tbs-label" style="color:${tbsDelta>=0?'#4ade80':'#f87171'}">${tbsDelta>=0?'+':''}${fmtNum(tbsDelta)} since last visit</div>` : '<div class="trh-tbs-label">TBS</div>'}
-          </div>
-        </div>
-      </div>
-
-      <hr class="trh-divider">
-
-      ${rec ? (() => {
-        const need      = Math.round(targets[rec] - (stats[rec] || 0));
-        const needText  = need > 0
-          ? `Need +${fmtNum(need)}`
-          : need < 0
-            ? `${fmtNum(Math.abs(need))} over target`
-            : `On target`;
-        const bestGym   = findBestGymForStat(rec);
-        const activeId  = getActiveGymId();
-        const suboptimal = bestGym && bestGym.id !== activeId;
-        const gymHint   = bestGym
-          ? (suboptimal
-              ? `<div style="font-size:10px;color:#facc15;margin-top:6px">Best gym: ${escapeHtml(gymName(bestGym.id))} (${bestGym.dots} dots) - click to switch</div>`
-              : `<div style="font-size:10px;color:#4ade80;margin-top:6px">Active gym ${escapeHtml(gymName(activeId))} is already best (${bestGym.dots} dots)</div>`)
-          : `<div style="font-size:10px;color:#888;margin-top:6px">Gym info not detected</div>`;
-        const btnLabel = nextTrainLabel(rec, stats);
-        return `
-      <div class="trh-section">
-        <div class="trh-label">Train Next</div>
-        <div class="trh-rec-box">
-          <div class="trh-rec-stat" style="color:${STAT_COLORS[rec]}">${STAT_LABELS[rec]}</div>
-          <div style="font-size:11px;color:#888">
-            Currently at ${fmtNum(stats[rec])} - Target ${fmtNum(Math.round(targets[rec]))} - ${needText}
-          </div>
-          <div style="font-size:10px;color:#a78bfa;margin-top:2px">
-            ${recReason === 'headroom'
-              ? 'High stat — opening headroom so you can keep training your best stat'
-              : recReason === 'raise'
-                ? 'High stat — every other stat is at its ratio cap; raising the bar'
-                : recReason === 'failsafe'
-                  ? 'Catch-up — below 80% of its ratio cap, topping it back up'
-                  : 'Best yield now' + ((gymMults[rec] || 1) > 1.001 ? ' (' + STAT_LABELS[rec] + ' +' + Math.round(((gymMults[rec] || 1) - 1) * 100) + '% gym gains)' : '') + ', riding it as long as possible'}
-          </div>
-          ${gymHint}
-          <button class="trh-btn" id="trh-train-now" data-trh-stat="${rec}" style="margin-top:10px;width:100%">
-            ${btnLabel}
-          </button>
-          <div style="font-size:9px;color:#888;margin-top:4px;text-align:center">
-            Each click = 1 action. Keep clicking until trained.
-          </div>
-        </div>
-      </div>
-      <hr class="trh-divider">`;
-      })() : ''}
-
-      ${(() => {
-        const energy = readPageEnergy();
-        const roles = getRoles(highStat);
-        const room = computeAccessHeadroom(stats, selectedRatio, highStat, roles);
-        const energyLine = energy
-          ? `Energy ${fmtNum(energy.current)}/${fmtNum(energy.max)}`
-          : 'Energy not detected on page';
-        const rows = Object.entries(STAT_LABELS).map(([k, l]) => {
-          const best = findBestGymForStat(k);
-          const gymSuffix = best ? ` <span style="color:#888;font-size:10px">@ ${escapeHtml(gymName(best.id))}</span>` : '';
-          const h = room[k];
-          let txt, col = '#ddd';
-          if (k === highStat || h === Infinity) { txt = 'no limit'; }
-          else if (h <= 0) { txt = 'at limit'; col = '#f87171'; }
-          // amber when within 0.5% of the stat's value of its limit (getting close)
-          else { txt = fmtShort(h) + ' to limit'; if (h < (stats[k] || 0) * 0.005) col = '#facc15'; }
-          return `
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px">
-            <span style="color:${STAT_COLORS[k]}">${l}${gymSuffix}</span>
-            <span style="color:${col};font-weight:700">${txt}</span>
-          </div>`;
-        }).join('');
-        return `
-      <div class="trh-section">
-        <div class="trh-label trh-collapsible" data-trh-collapse="repplan" style="cursor:pointer;user-select:none">
-          <span style="display:inline-block;width:12px;text-align:center">${collapseRepPlan ? '▶' : '▼'}</span> Headroom to gym limit
-        </div>
-        <div${collapseRepPlan ? ' style="display:none"' : ''}>
-          <div class="trh-rec-box">
-            <div style="font-size:11px;color:#888;margin-bottom:6px">${energyLine}</div>
-            ${rows}
-            <div style="font-size:10px;color:#888;margin-top:8px;text-align:center">
-              Headroom is read straight from your stats (${STAT_LABELS[highStat]}/1.25 − each other stat). Train Next fills 999 (all your energy); a stat already at its limit isn't trained so you keep your special gyms.
-            </div>
-          </div>
-        </div>
-      </div>
-      <hr class="trh-divider">`;
-      })()}
-
-      <div class="trh-section">
-        <div class="trh-label trh-collapsible" data-trh-collapse="stats" style="cursor:pointer;user-select:none">
-          <span style="display:inline-block;width:12px;text-align:center">${collapseStats ? '▶' : '▼'}</span> Stats
-        </div>
-        <div${collapseStats ? ' style="display:none"' : ''}>
-          ${statRows}
-        </div>
-      </div>`;
-  }
-
-  function renderHistory() {
-    if (history.length === 0) {
-      return `<div class="trh-no-history">No history yet.<br>Stats are recorded each time you visit this page.<br>Check back after training!</div>`;
+    const marks = [];
+    if (!allFound) marks.push('<span class="trh-mark trh-missing">Some stats not read, refresh the page</span>');
+    for (const w of getDriftWarnings(stats, targets, roles)) {
+      marks.push(`<span class="trh-mark">${STAT_LABELS[w.key]} drifted ${Math.round((w.prevPct - w.currPct) * 100)}%</span>`);
     }
-    const sorted = [...history].reverse().slice(0, 15);
-    const headerRow = `
-      <div class="trh-history-row" style="font-size:10px;color:#777;text-transform:uppercase;letter-spacing:1px">
-        <div class="trh-history-date">Date</div>
-        ${Object.entries(STAT_LABELS).map(([k, label])=>`<div class="trh-history-stat" style="color:${STAT_COLORS[k]}">${label}</div>`).join('')}
-        <div class="trh-history-stat">TBS</div>
+    if (gymMultsError) marks.push('<span class="trh-mark">Gym perks not updated, see Settings</span>');
+    const marksHtml = marks.length ? `<div class="trh-marks">${marks.join('')}</div>` : '';
+
+    if (!rec) {
+      return `<div class="trh-answer"><div class="trh-eyebrow">Train next</div>
+        <div class="trh-facts">No stat to recommend yet.</div>${marksHtml}</div>`;
+    }
+
+    const cur = stats[rec] || 0;
+    const tgt = Math.round(targets[rec] || 0);
+    const need = Math.round(tgt - cur);
+    const needText = need > 0 ? `+${fmtShort(need)} to target`
+                   : need < 0 ? `${fmtShort(-need)} over target` : 'On target';
+    const reason = recReason === 'headroom'
+      ? 'Opening headroom so you can keep training your best stat'
+      : recReason === 'raise'
+        ? 'Every other stat is at its ratio cap, so the bar goes up'
+        : recReason === 'failsafe'
+          ? 'Catching up, it fell below 92% of its ratio cap'
+          : 'Best yield now' + ((gymMults[rec] || 1) > 1.001 ? ` (+${Math.round(((gymMults[rec] || 1) - 1) * 100)}% gym gains)` : '');
+    const bestGym = findBestGymForStat(rec);
+    const activeId = getActiveGymId();
+    const gymLine = !bestGym ? 'Gym info not detected'
+      : bestGym.id !== activeId ? `Best gym: ${escapeHtml(gymName(bestGym.id))} (${bestGym.dots} dots)`
+      : `You are at the best gym, ${escapeHtml(gymName(activeId))}`;
+
+    return `
+      <div class="trh-answer">
+        <div class="trh-eyebrow">Train next</div>
+        <div class="trh-verb">${statDot(rec)}${STAT_LABELS[rec]}</div>
+        <div class="trh-facts">${needText} <span class="trh-dim">· ${fmtShort(cur)} of ${fmtShort(tgt)}</span></div>
+        <div class="trh-facts trh-dim">${reason}. ${gymLine}.</div>
+        ${marksHtml}
+        <button class="trh-go" id="trh-train-now" data-trh-stat="${rec}">${nextTrainLabel(rec, stats)}</button>
+        <div class="trh-prov"><span>Each click is one action</span><span>Read from this page</span></div>
       </div>`;
-    const rows = sorted.map((entry, i) => {
-      const prev = sorted[i + 1];
-      const tbs = Object.keys(STAT_LABELS).reduce((a, k) => a + (entry[k] || 0), 0);
-      const prevTbs = prev ? Object.keys(STAT_LABELS).reduce((a, k) => a + (prev[k] || 0), 0) : null;
-      const tbsDelta = prevTbs !== null ? tbs - prevTbs : null;
+  }
+
+  function renderKeyStats(stats, targets, roles) {
+    const grade = overallGrade(stats, targets, roles, selectedRatio);
+    const tbs = tbsOf(stats);
+    const lastEntry = history.length >= 2 ? history[history.length - 2] : null;
+    const tbsDelta = lastEntry ? tbs - tbsOf(lastEntry) : null;
+    const energy = readPageEnergy();
+    const deltaLine = tbsDelta === null ? 'Total battle stats'
+      : `<span class="${tbsDelta >= 0 ? 'trh-pos' : 'trh-neg'}">${tbsDelta >= 0 ? '+' : '−'}${fmtShort(Math.abs(tbsDelta))} since last</span>`;
+    return `
+      <div class="trh-keys">
+        <div class="trh-tile"><div class="trh-eyebrow">Ratio health</div>
+          <div class="trh-tile-v">${grade.letter}</div><div class="trh-tile-s">${grade.score}% on ratio</div></div>
+        <div class="trh-tile"><div class="trh-eyebrow">Total stats</div>
+          <div class="trh-tile-v" title="${fmtNum(tbs)}">${fmtShort(tbs)}</div><div class="trh-tile-s">${deltaLine}</div></div>
+        <div class="trh-tile"><div class="trh-eyebrow">Energy</div>
+          <div class="trh-tile-v">${energy ? fmtNum(energy.current) : '—'}</div>
+          <div class="trh-tile-s">${energy ? 'of ' + fmtNum(energy.max) : 'not on page'}</div></div>
+      </div>`;
+  }
+
+  function renderHeadroom(stats, roles) {
+    const room = computeAccessHeadroom(stats, selectedRatio, highStat, roles);
+    const atLimit = [];
+    const rows = Object.entries(STAT_LABELS).map(([k, l]) => {
+      const best = findBestGymForStat(k);
+      const h = room[k];
+      let txt, cls = '';
+      if (k === highStat || h === Infinity) txt = 'no limit';
+      else if (h <= 0) { txt = 'at limit'; cls = 'trh-warntext'; atLimit.push(l); }
+      else { txt = fmtShort(h) + ' to limit'; if (h < (stats[k] || 0) * 0.005) cls = 'trh-warntext'; }
+      return `<div class="trh-row"><span class="trh-row-l">${statDot(k)}${l}${best ? ` <span class="trh-sub">@ ${escapeHtml(gymName(best.id))}</span>` : ''}</span>
+        <span class="trh-row-r ${cls}">${txt}</span></div>`;
+    }).join('');
+    const keeps = buildKeepsSpecialGyms(selectedRatio, roles);
+    const summary = !keeps ? 'No gym limits for this ratio'
+      : atLimit.length ? atLimit.join(', ') + ' at limit' : 'All stats have room';
+    return section('headroom', 'Headroom', summary, rows, atLimit.length ? 'trh-warntext' : '');
+  }
+
+  function renderStats(stats, targets, roles) {
+    const roleName = { high: '1st', secondary: '2nd', tert1: '3rd', tert2: 'dump' };
+    let below = 0;
+    const rows = Object.keys(STAT_LABELS).map((k) => {
+      const role = Object.keys(roles).find(r => roles[r] === k);
+      const actual = stats[k] || 0;
+      const target = targets[k] || 0;
+      const isDump = isStatDumped(k, selectedRatio, roles);
+      const pct = isDump || !target ? 0 : Math.min(actual / target, 1) * 100;
+      const diff = Math.round(target - actual);
+      let sub;
+      if (isDump) sub = 'keep low';
+      else if (target && actual / target < 0.95) { sub = `+${fmtShort(diff)} needed`; below++; }
+      else if (target && actual / target > 1.05) sub = `${fmtShort(-diff)} over`;
+      else sub = 'on target';
       return `
-        <div class="trh-history-row">
-          <div class="trh-history-date">${fmtDate(entry.ts)}</div>
-          ${Object.keys(STAT_LABELS).map(k => {
-            const delta = prev ? (entry[k]||0) - (prev[k]||0) : null;
-            return `<div class="trh-history-stat" style="color:${STAT_COLORS[k]}">
-              ${fmtShort(entry[k])}
-              ${delta !== null && delta !== 0 ? `<div class="trh-history-delta" style="color:${delta>0?'#4ade80':'#f87171'}">${delta>0?'+':''}${fmtShort(delta)}</div>` : ''}
-            </div>`;
-          }).join('')}
-          <div class="trh-history-stat" style="color:#74c0fc">
-            ${fmtShort(tbs)}
-            ${tbsDelta !== null && tbsDelta !== 0 ? `<div class="trh-history-delta" style="color:${tbsDelta>0?'#4ade80':'#f87171'}">${tbsDelta>0?'+':''}${fmtShort(tbsDelta)}</div>` : ''}
+        <div class="trh-row">
+          <div class="trh-statcol">
+            <span class="trh-row-l">${statDot(k)}${STAT_LABELS[k]} <span class="trh-sub">${roleName[role] || ''}</span></span>
+            ${isDump ? '' : `<div class="trh-bar"><i style="width:${pct.toFixed(1)}%"></i></div>`}
           </div>
+          <div class="trh-row-r">${fmtShort(actual)}<div class="trh-sub">${sub}</div></div>
         </div>`;
     }).join('');
+    const summary = below ? `${below} below target` : 'All on target';
+    return section('stats', 'Stats', summary, rows);
+  }
 
-    return `
-      <div class="trh-section">
-        <div class="trh-label">Stat History (last ${sorted.length} snapshots)</div>
-        ${headerRow}${rows}
+  function renderHistorySection(stats, targets, roles) {
+    const exportText = escapeHtml(buildExportText(stats, targets, roles));
+    const exportBits = `
+      <div class="trh-ctl">
+        ${history.length > 3 ? `<button class="trh-btn" id="trh-history-all">${showAllHistory ? 'Show fewer' : 'Show all ' + history.length}</button>` : ''}
+        <button class="trh-btn" id="trh-copy-export">Copy snapshot</button>
+        ${history.length ? '<button class="trh-btn" id="trh-clear-history">Clear history</button>' : ''}
       </div>
-      <div style="text-align:right;margin-top:8px">
-        <button class="trh-btn" id="trh-clear-history">Clear History</button>
-      </div>`;
+      <pre id="trh-export-text" class="trh-export-box" hidden>${exportText}</pre>`;
+
+    if (!history.length) {
+      return section('history', 'History', 'No snapshots yet',
+        `<div class="trh-sub" style="padding:6px 0">A snapshot is saved each time you open the gym.</div>${exportBits}`);
+    }
+
+    const sorted = [...history].reverse();
+    let body;
+    if (showAllHistory) {
+      const keys = Object.keys(STAT_LABELS);
+      body = `<div class="trh-htable"><table>
+        <thead><tr><th>Date</th>${keys.map(k => `<th>${statDot(k)}</th>`).join('')}<th>Total</th></tr></thead>
+        <tbody>${sorted.map((e, i) => {
+          const prev = sorted[i + 1];
+          const d = prev ? tbsOf(e) - tbsOf(prev) : null;
+          return `<tr><td>${fmtDate(e.ts)}</td>${keys.map(k => `<td>${fmtShort(e[k])}</td>`).join('')}
+            <td>${fmtShort(tbsOf(e))}${d ? ` <span class="${d > 0 ? 'trh-pos' : 'trh-neg'}">${d > 0 ? '+' : '−'}${fmtShort(Math.abs(d))}</span>` : ''}</td></tr>`;
+        }).join('')}</tbody></table></div>`;
+    } else {
+      body = sorted.slice(0, 3).map((e, i) => {
+        const prev = sorted[i + 1];
+        const d = prev ? tbsOf(e) - tbsOf(prev) : null;
+        return `<div class="trh-row"><span class="trh-row-l">${fmtDate(e.ts)}</span>
+          <span class="trh-row-r">${fmtShort(tbsOf(e))}${d ? ` <span class="trh-sub ${d > 0 ? 'trh-pos' : 'trh-neg'}">${d > 0 ? '+' : '−'}${fmtShort(Math.abs(d))}</span>` : ''}</span></div>`;
+      }).join('');
+    }
+
+    const weekAgo = Date.now() - 7 * 86400000;
+    const base = history.find(e => e.ts >= weekAgo);
+    const weekGain = base && base !== history[history.length - 1] ? tbsOf(history[history.length - 1]) - tbsOf(base) : 0;
+    const summary = `${history.length} snapshot${history.length === 1 ? '' : 's'}` +
+      (weekGain ? ` · ${weekGain > 0 ? '+' : '−'}${fmtShort(Math.abs(weekGain))} this week` : '');
+    return section('history', 'History', summary, body + exportBits);
   }
 
-  function renderExport(stats, targets, roles) {
-    const exportText = buildExportText(stats, targets, roles);
-
-    return `
-      <div class="trh-section">
-        <div class="trh-label">Export Snapshot</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px">
-          Copy a plain-text summary of your current ratio health and target stats.
-        </div>
-        <div style="display:flex;justify-content:flex-end">
-          <button class="trh-btn" id="trh-copy-export">Copy to Clipboard</button>
-        </div>
-        <pre id="trh-export-text" class="trh-export-box">${escapeHtml(exportText)}</pre>
-      </div>`;
-  }
-
-  function renderSettings() {
-    const roles = getRoles(highStat);
+  function renderSettingsSection(roles) {
     const ratio = RATIOS[selectedRatio];
+    const raw = ratio.raw;
+    const fields = [
+      { id: 'high', role: 'high', label: '1st' },
+      { id: 'secondary', role: 'secondary', label: '2nd' },
+      { id: 'tert1', role: 'tert1', label: '3rd' },
+      { id: 'tert2', role: 'tert2', label: 'Dump' },
+    ].map((f, i) => `
+      <label class="trh-cf"><span>${statDot(roles[f.role])} ${f.label} · ${STAT_LABELS[roles[f.role]]}</span>
+        <input id="trh-c-${f.id}" class="trh-ratio-input" type="number" inputmode="decimal" step="0.05" min="0" value="${fmtRatioNum(raw[i])}"></label>`).join('');
+    const mults = Object.entries(STAT_LABELS)
+      .map(([k, l]) => ({ l, pct: Math.round(((gymMults[k] || 1) - 1) * 1000) / 10 }))
+      .filter(x => x.pct > 0).map(x => `${x.l.slice(0, 3)} +${x.pct}%`).join(' · ') || 'none';
+    const keeps = buildKeepsSpecialGyms(selectedRatio, roles);
+    const dumpSummary = isStatDumped(roles.tert2, selectedRatio, roles) || ratio.multipliers.tert2 < 0.5
+      ? ` · ${STAT_LABELS[roles.tert2]} dump` : '';
 
-    const slotOrder = [
-      { role: 'high',      label: '1st - highest',    mult: 1.00 },
-      { role: 'secondary', label: '2nd',               mult: ratio.multipliers.secondary },
-      { role: 'tert1',     label: '3rd',               mult: ratio.multipliers.tert1 },
-      { role: 'tert2',     label: '4th - dump/lowest', mult: ratio.multipliers.tert2 },
-    ];
+    const inner = `
+      <div class="trh-lbl">Ratio</div>
+      <div class="trh-ctl" id="trh-ratio-buttons">
+        ${Object.entries(RATIOS).map(([k, r]) =>
+          `<button class="trh-btn ${selectedRatio === k ? 'active' : ''}" data-trh-ratio="${k}">${r.short}</button>`).join('')}
+      </div>
+      <div class="trh-cgrid">${fields}</div>
+      <div class="trh-sub" id="trh-c-sum" style="padding-top:6px">${ratioSummaryText(raw, roles)}</div>
+      <div class="trh-sub">Change any number and it becomes your Custom ratio.</div>
+      <div class="trh-ctl" id="trh-save-row"${selectedRatio === 'custom' ? '' : ' hidden'}>
+        <button class="trh-btn active" id="trh-save-custom">Save custom ratio</button>
+      </div>
 
-    const mappingRows = slotOrder.map(({ role, label, mult }) => {
-      const statKey = roles[role];
-      const isDump  = mult === 0;
-      return `
-        <div class="trh-slot-row">
-          <span class="trh-slot-label">${label}</span>
-          <span style="flex:1;color:${STAT_COLORS[statKey]};font-weight:700">${STAT_LABELS[statKey]}</span>
-          <span class="trh-slot-mult" style="color:${isDump ? '#f87171' : ''}">${isDump ? 'dump (x0)' : 'x' + mult.toFixed(2)}</span>
-        </div>`;
-    }).join('');
+      <div class="trh-lbl">Highest stat</div>
+      <div class="trh-ctl">
+        ${Object.entries(STAT_LABELS).map(([k, l]) =>
+          `<button class="trh-btn ${highStat === k ? 'active' : ''}" data-trh-high="${k}">${l}</button>`).join('')}
+      </div>
 
-    return `
-      <div class="trh-section">
-        <div class="trh-label">Active Ratio</div>
-        <div class="trh-ctrl-row">
-          ${Object.entries(RATIOS).map(([k, r]) =>
-            `<button class="trh-btn ${selectedRatio === k ? 'active' : ''}" data-trh-ratio="${k}">${r.short}</button>`
-          ).join('')}
-        </div>
+      <div class="trh-lbl">Dump stat${ratio.forcedDump ? ` <span class="trh-dim">· ${ratio.short} recommends ${STAT_LABELS[ratio.forcedDump]}</span>` : ''}</div>
+      <div class="trh-ctl">
+        ${Object.entries(STAT_LABELS).filter(([k]) => k !== highStat).map(([k, l]) =>
+          `<button class="trh-btn ${roles.tert2 === k ? 'active' : ''}" data-trh-defdump="${k}">${l}</button>`).join('')}
       </div>
-      <div class="trh-section">
-        <div class="trh-label">Your Highest Stat</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px">
-          Pick whichever stat you train the most. The 2nd, 3rd and 4th slots are assigned automatically. Use the Custom Ratio section below if you want different multipliers.
-        </div>
-        <div class="trh-ctrl-row">
-          ${Object.entries(STAT_LABELS).map(([k, l]) =>
-            `<button class="trh-btn ${highStat === k ? 'active' : ''}" data-trh-high="${k}">${l}</button>`
-          ).join('')}
-        </div>
-      </div>
-      <div class="trh-section">
-        <div class="trh-label">Dump Stat</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px">
-          Pick which stat should sit in the dump/lowest slot (4th). The remaining two auto-fill the 2nd and 3rd slots.${ratio.forcedDump ? ` <strong style="color:${STAT_COLORS[ratio.forcedDump]}">${STAT_LABELS[ratio.forcedDump]}</strong> is the recommended dump for ${ratio.label}.` : ''}
-        </div>
-        <div class="trh-ctrl-row">
-          ${Object.entries(STAT_LABELS)
-            .filter(([k]) => k !== highStat)
-            .map(([k, l]) => `<button class="trh-btn ${roles.tert2 === k ? 'active' : ''}" data-trh-defdump="${k}">Dump ${l}</button>`)
-            .join('')}
-        </div>
-      </div>
-      <div class="trh-section">
-        <div class="trh-label">Current Stat Order for ${ratio.label}</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px">
-          The multiplier (x) shows what fraction of your 1st stat each one is targeted at.
-        </div>
-        ${mappingRows}
-      </div>
-      <hr class="trh-divider">
-      <div class="trh-section">
-        <div class="trh-label">Display</div>
-        <div class="trh-ctrl-row">
-          <button class="trh-btn ${theme==='dark'?'active':''}" data-trh-theme="dark">Dark</button>
-          <button class="trh-btn ${theme==='light'?'active':''}" data-trh-theme="light">Light</button>
-        </div>
-      </div>
-      <hr class="trh-divider">
-      <div class="trh-section">
-        <div class="trh-label">Ratio Multipliers</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px">
-          Showing values for <strong>${ratio.label}</strong>. Each number is a multiplier relative to your 1st stat (0.80 = train to 80% of highest). Edit and save to store your own Custom ratio.
-        </div>
-        <div class="trh-custom-grid">
-          <div class="trh-custom-field">
-            <label style="color:${STAT_COLORS[roles.high]}">1st - ${STAT_LABELS[roles.high]} (always 1.0)</label>
-            <input type="number" value="1.00" disabled style="opacity:0.4">
-          </div>
-          <div class="trh-custom-field">
-            <label style="color:${STAT_COLORS[roles.secondary]}">2nd - ${STAT_LABELS[roles.secondary]}</label>
-            <input id="trh-c-secondary" type="number" step="0.01" min="0" max="1" value="${ratio.multipliers.secondary}">
-          </div>
-          <div class="trh-custom-field">
-            <label style="color:${STAT_COLORS[roles.tert1]}">3rd - ${STAT_LABELS[roles.tert1]}</label>
-            <input id="trh-c-tert1" type="number" step="0.01" min="0" max="1" value="${ratio.multipliers.tert1}">
-          </div>
-          <div class="trh-custom-field">
-            <label style="color:${STAT_COLORS[roles.tert2]}">4th / Dump - ${STAT_LABELS[roles.tert2]}</label>
-            <input id="trh-c-tert2" type="number" step="0.01" min="0" max="1" value="${ratio.multipliers.tert2}">
-          </div>
-        </div>
-        <div style="margin-top:8px">
-          <button class="trh-btn" id="trh-save-custom">Save as Custom Ratio</button>
-        </div>
-      </div>
-      <hr class="trh-divider">
-      <div class="trh-section">
-        <div class="trh-label">Gym Gain Multipliers (Steadfast + perks)</div>
-        <div style="font-size:11px;color:#888;margin-bottom:8px">
-          Read from the Torn API (<code>user?selections=perks</code>) using your saved key — Steadfast, education, property and book gym-gain perks, combined the way Torn stacks them. The rep plan weights each stat's gains by these. Updated on load and when you refresh.
-        </div>
-        <div class="trh-ctrl-row" style="flex-wrap:wrap">
-          ${Object.entries(STAT_LABELS).map(([k, l]) => {
-            const pct = Math.round(((gymMults[k] || 1) - 1) * 1000) / 10;
-            return `<span class="trh-slot-mult" style="color:${STAT_COLORS[k]};margin-right:10px">${l}: +${pct}%</span>`;
-          }).join('')}
-        </div>
-        <div style="font-size:11px;color:${buildKeepsSpecialGyms(selectedRatio, roles) ? '#4ade80' : '#facc15'};margin-top:8px">
-          ${buildKeepsSpecialGyms(selectedRatio, roles)
-            ? `Special-gym access protection: <strong>ON</strong> for ${STAT_LABELS[highStat]}-high (keeps the x1.25 access ratio safe).`
-            : `Special-gym access protection: <strong>OFF</strong> — this ratio targets a secondary stat above 80% of your high stat, which can't keep the special gyms.`}
-        </div>
-        <div style="font-size:10px;color:#666;margin-top:4px">
-          ${gymMultsFetchedAt ? 'Last updated: ' + new Date(gymMultsFetchedAt).toLocaleString() : 'Not fetched yet — set a key and refresh.'}
-        </div>
-        ${gymMultsError ? `<div class="trh-warn" style="margin-top:6px;margin-bottom:0">
-          Could not refresh the multipliers: ${escapeHtml(gymMultsError)}${gymMultsFetchedAt ? ' — the values above are the last ones that arrived, so the rep plan may be weighting the wrong stat.' : ' — the rep plan is running on 1.0 for every stat.'}
-        </div>` : ''}
-        <div class="trh-ctrl-row" style="margin-top:8px">
-          <button class="trh-btn" id="trh-set-apikey">Set API key</button>
-          <button class="trh-btn" id="trh-refresh-mults">Refresh now</button>
-        </div>
+
+      <div class="trh-lbl">Gym gain multipliers</div>
+      <div class="trh-row"><span class="trh-row-l">From your API key</span><span class="trh-row-r">${mults}</span></div>
+      <div class="trh-row"><span class="trh-row-l">Special-gym protection</span><span class="trh-row-r ${keeps ? '' : 'trh-warntext'}">${keeps ? 'On' : 'Off for this ratio'}</span></div>
+      <div class="trh-sub" style="padding-top:4px">${gymMultsFetchedAt ? 'Updated ' + escapeHtml(new Date(gymMultsFetchedAt).toLocaleString()) : 'Not fetched yet. Set a key with perks access.'}</div>
+      ${gymMultsError ? `<div class="trh-sub trh-warntext" style="padding-top:4px">Could not refresh: ${escapeHtml(gymMultsError)}${gymMultsFetchedAt ? '. Using the last values that arrived.' : '. Using 1.0 for every stat.'}</div>` : ''}
+      <div class="trh-ctl">
+        <button class="trh-btn" id="trh-set-apikey">Set API key</button>
+        <button class="trh-btn" id="trh-refresh-mults">Refresh now</button>
       </div>`;
+    return section('settings', 'Settings', `${ratio.short} · ${STAT_LABELS[highStat]} high${dumpSummary}`, inner);
   }
 
-  // Info tab
-  function renderInfo() {
-    return `
-      <div class="trh-section">
-        <div class="trh-label">Why not just train all stats equally?</div>
-        <div style="font-size:12px;color:#ddd;line-height:1.7">
-          Torn has <strong style="color:#e2e8f0">specialist gyms</strong> that give significantly better gains than regular gyms - but they have <strong style="color:#e2e8f0">stat ratio requirements</strong> to unlock and keep access. Baldr's and Hank's ratios are the two most popular ways to structure your stats so you can use those better gyms on as many stats as possible.
-        </div>
-      </div>
+  // "Targets: Defense 80%, Speed 60%, Dexterity 60% of Strength." from four raw ratio numbers.
+  function ratioSummaryText(raw, roles) {
+    const v = raw.map(n => (Number.isFinite(Number(n)) && Number(n) >= 0 ? Number(n) : NaN));
+    if (v.some(Number.isNaN)) return 'Use numbers of 0 or more.';
+    if (!(v[0] > 0)) return 'The 1st number must be above 0.';
+    if (v.slice(1).some(x => x > v[0])) return 'The 1st number must be the largest.';
+    const pct = (x) => Math.round(x / v[0] * 100) + '%';
+    return `Ratio ${v.map(fmtRatioNum).join(' : ')}. Targets: ${STAT_LABELS[roles.secondary]} ${pct(v[1])}, ` +
+      `${STAT_LABELS[roles.tert1]} ${pct(v[2])}, ${STAT_LABELS[roles.tert2]} ${pct(v[3])} of ${STAT_LABELS[roles.high]}.`;
+  }
 
-      <hr class="trh-divider">
+  function renderHowItWorks() {
+    const inner = `<div class="trh-prose">
+      <h4>Train next</h4>
+      <p>Picks the stat with the best yield right now (gym dots × your gym-gain perks) and rides it until it reaches its ratio cap. When every stat is capped it raises your highest stat 8% to open more room. A stat that falls below 92% of its cap is caught up first.</p>
+      <p>Each click on the button does one step: switch gym, set reps, or train. Keep clicking until trained. Reps are always 999 (Torn trains as many as your energy allows), and a stat already at its gym limit is not trained.</p>
+      <h4>Headroom</h4>
+      <p>How far each stat can grow before you lose a special gym. It is read straight from your stats (highest stat ÷ 1.25 minus each other stat).</p>
+      <h4>Why ratios</h4>
+      <p>Specialist gyms give better gains per energy but require a stat ratio to unlock and keep. George's gym is about 7.3 dots for 10 energy, special gyms about 7.5 for 25, elite gyms about 8.0 for 50.</p>
+      <p><b>Baldr's ratio, 1.25 : 1 : 0.75 : 0.75.</b> Balanced. Unlocks an elite gym for your highest stat and a special gym for your 2nd. Works for any stat pairing.</p>
+      <p><b>Hank's ratio, 1.25 : 1 : 1 : ~0.</b> Three stats trained hard, one kept as low as possible. Faster total gains, but your highest stat should be Defense or Dexterity, and it is hard to switch away from later.</p>
+      <h4>The four stats</h4>
+      <p><b>Strength</b> is how hard you hit. <b>Speed</b> is how often you hit. <b>Defense</b> reduces damage taken. <b>Dexterity</b> is how often you dodge.</p>
+    </div>`;
+    return section('how', 'How it works', 'Ratios, gym dots, headroom', inner);
+  }
 
-      <div class="trh-section">
-        <div class="trh-label">Gym Dots - Why They Matter</div>
-        <div style="font-size:12px;color:#ddd;line-height:1.7;margin-bottom:8px">
-          Gym dots are a multiplier on your stat gains per energy spent. Higher dots = more gains per train. The values below are approximate and may vary by gym.
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:11px">
-          <div style="background:#222;border:1px solid #444;border-radius:4px;padding:8px;text-align:center">
-            <div style="color:#888;font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">George's Gym</div>
-            <div style="color:#facc15;font-size:18px;font-weight:700">~7.3</div>
-            <div style="color:#888;font-size:10px">dots - 10e/train</div>
-            <div style="color:#888;font-size:10px;margin-top:4px">No requirements</div>
-          </div>
-          <div style="background:#222;border:1px solid #444;border-radius:4px;padding:8px;text-align:center">
-            <div style="color:#888;font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Special Gyms</div>
-            <div style="color:#fb923c;font-size:18px;font-weight:700">~7.5</div>
-            <div style="color:#888;font-size:10px">dots - 25e/train</div>
-            <div style="color:#888;font-size:10px;margin-top:4px">Ratio required</div>
-          </div>
-          <div style="background:#222;border:1px solid #444;border-radius:4px;padding:8px;text-align:center">
-            <div style="color:#888;font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">Elite Gyms</div>
-            <div style="color:#4ade80;font-size:18px;font-weight:700">~8.0</div>
-            <div style="color:#888;font-size:10px">dots - 50e/train</div>
-            <div style="color:#888;font-size:10px;margin-top:4px">Strict ratio req.</div>
-          </div>
-        </div>
-      </div>
-
-      <hr class="trh-divider">
-
-      <div class="trh-section">
-        <div class="trh-label">Baldr's Ratio - 1.25 : 1 : 0.75 : 0.75</div>
-        <div style="font-size:12px;color:#ddd;line-height:1.7;margin-bottom:8px">
-          A <strong style="color:#e2e8f0">balanced specialist build</strong>. Your high stat leads, secondary sits at 80% of it, and your two lower stats sit at 75% (about 60% relative to high). Your lowest stat is still around 22% of your total - a much more even spread.
-        </div>
-        <div style="font-size:12px;color:#ddd;line-height:1.7;margin-bottom:8px">
-          With Baldr's you unlock <strong style="color:#e2e8f0">two specialist gyms</strong>: one elite (8.0 dots) for your high stat, and one special (7.5 dots) for your secondary. Your two lower stats train at George's.
-        </div>
-        <div style="background:#0a2010;border:1px solid #1a4020;border-left:3px solid #4ade80;border-radius:4px;padding:8px 10px;font-size:11px;color:#86efac">
-          Best for: Any stat pairing - works equally well for offensive (Str/Spd) or defensive (Def/Dex) high stat builds. Good all-around starting point for most players.
-        </div>
-      </div>
-
-      <hr class="trh-divider">
-
-      <div class="trh-section">
-        <div class="trh-label">Hank's Ratio - 1.25 : 1 : 1 : ~0</div>
-        <div style="font-size:12px;color:#ddd;line-height:1.7;margin-bottom:8px">
-          An <strong style="color:#e2e8f0">aggressive efficiency build</strong>. Three stats are trained hard while one (the dump stat) is kept as low as possible. This unlocks <strong style="color:#e2e8f0">two specialist gyms for three stats</strong> simultaneously, giving faster overall gains.
-        </div>
-        <div style="font-size:12px;color:#ddd;line-height:1.7;margin-bottom:8px">
-          <strong style="color:#e2e8f0">Important:</strong> For Hank's, your high stat almost has to be Def or Dex - <em style="color:#64748b">not Str or Spd</em>. If you dump Speed, you'll miss most attacks. If you dump Strength, you'll hit often but deal little to no damage. Either way you lose fights.
-        </div>
-        <div style="background:#200a0a;border:1px solid #402020;border-left:3px solid #f87171;border-radius:4px;padding:8px 10px;font-size:11px;color:#fca5a5">
-          Best for: Def or Dex high-stat builds in mid-to-late game. More total gains over time, but very restrictive - your dump stat must stay extremely low. Hard to switch away from later.
-        </div>
-      </div>
-
-      <hr class="trh-divider">
-
-      <div class="trh-section">
-        <div class="trh-label">Stats Explained</div>
-        <div style="display:flex;flex-direction:column;gap:6px;font-size:12px">
-          <div style="display:flex;gap:10px;align-items:flex-start;padding:6px;background:#222;border-radius:4px">
-            <div><strong style="color:#f97316">Strength</strong> <span style="color:#888;font-size:10px">OFFENSIVE</span><br><span style="color:#64748b">How hard you hit. More Str = more damage per successful strike. Useless if your Speed is too low to land hits.</span></div>
-          </div>
-          <div style="display:flex;gap:10px;align-items:flex-start;padding:6px;background:#222;border-radius:4px">
-            <div><strong style="color:#22d3ee">Speed</strong> <span style="color:#888;font-size:10px">OFFENSIVE</span><br><span style="color:#64748b">How often you hit. More Spd = higher hit chance each round. Str and Spd work together - you need both to deal reliable damage.</span></div>
-          </div>
-          <div style="display:flex;gap:10px;align-items:flex-start;padding:6px;background:#222;border-radius:4px">
-            <div><strong style="color:#a78bfa">Defense</strong> <span style="color:#888;font-size:10px">DEFENSIVE</span><br><span style="color:#64748b">Reduces damage you take when hit. Works independently from Dexterity. High Def = you survive longer in fights.</span></div>
-          </div>
-          <div style="display:flex;gap:10px;align-items:flex-start;padding:6px;background:#222;border-radius:4px">
-            <div><strong style="color:#4ade80">Dexterity</strong> <span style="color:#888;font-size:10px">DEFENSIVE</span><br><span style="color:#64748b">How often you dodge enemy attacks. More Dex = enemy hits less often. Also works independently from Defense.</span></div>
-          </div>
-        </div>
-      </div>`;
+  function isTornDark() {
+    return !!(document.body && document.body.classList.contains('dark-mode'));
   }
 
   // Main render
   function render(stats) {
     const roles   = getRoles(highStat);
     const targets = computeTargets(stats, selectedRatio, highStat);
-
-    let tabContent = '';
-    if (activeTab === 'overview')        tabContent = renderOverview(stats, targets, roles, selectedRatio);
-    else if (activeTab === 'history')    tabContent = renderHistory();
-    else if (activeTab === 'export')     tabContent = renderExport(stats, targets, roles);
-    else if (activeTab === 'settings')   tabContent = renderSettings();
-    else if (activeTab === 'info')       tabContent = renderInfo();
-
-    const tabs = [
-      { id: 'overview',  label: 'Overview' },
-      { id: 'history',   label: 'History' },
-      { id: 'export',    label: 'Export' },
-      { id: 'settings',  label: 'Settings' },
-      { id: 'info',      label: 'Info' },
-    ];
-
     return `
-      <div id="trh-root" class="${theme === 'light' ? 'trh-light' : ''}">
+      <div id="trh-root" class="${isTornDark() ? 'trh-dark' : ''}">
         <div id="trh-header">
           <div id="trh-title">StatForge</div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <div style="font-size:10px;color:#777;letter-spacing:1px">
-              ${RATIOS[selectedRatio].short.toUpperCase()} - ${STAT_LABELS[highStat].toUpperCase()} HIGH
-            </div>
-          </div>
-        </div>
-        <div id="trh-tabs">
-          ${tabs.map(t => `<button class="trh-tab ${activeTab === t.id ? 'active' : ''}" data-trh-tab="${t.id}">${t.label}</button>`).join('')}
+          <div class="trh-ctx">${RATIOS[selectedRatio].short} · ${STAT_LABELS[highStat]} high</div>
         </div>
         <div id="trh-body">
-          ${tabContent}
+          ${renderAnswer(stats, targets, roles)}
+          ${renderKeyStats(stats, targets, roles)}
+          ${renderHeadroom(stats, roles)}
+          ${renderStats(stats, targets, roles)}
+          ${renderHistorySection(stats, targets, roles)}
+          ${renderSettingsSection(roles)}
+          ${renderHowItWorks()}
         </div>
       </div>`;
   }
@@ -1664,21 +1453,13 @@
 
   function attachEvents(wrapper, stats) {
     wrapper.addEventListener('click', (e) => {
-      const btn = e.target.closest('button, [data-trh-tab], [data-trh-ratio], [data-trh-high], [data-trh-theme], [data-trh-defdump], [data-trh-collapse]');
+      const btn = e.target.closest('button, [data-trh-ratio], [data-trh-high], [data-trh-defdump]');
       if (!btn) return;
 
-      if (btn.dataset.trhTab)   { activeTab = btn.dataset.trhTab; injectPanel(); return; }
       if (btn.dataset.trhRatio) { selectedRatio = btn.dataset.trhRatio; store.set('trh_ratio', selectedRatio); injectPanel(); return; }
       if (btn.dataset.trhHigh)  { highStat = btn.dataset.trhHigh; store.set('trh_high', highStat); headroomBaseHigh = null; failSafeStat = null; injectPanel(); return; }
-      if (btn.dataset.trhTheme) { theme = btn.dataset.trhTheme; store.set('trh_theme', theme); injectPanel(); return; }
       if (btn.dataset.trhDefdump) { defensiveDump = btn.dataset.trhDefdump; store.set('trh_def_dump', defensiveDump); injectPanel(); return; }
-      if (btn.dataset.trhCollapse) {
-        const key = btn.dataset.trhCollapse;
-        if (key === 'repplan') { collapseRepPlan = !collapseRepPlan; store.set('trh_collapse_repplan', collapseRepPlan); }
-        else if (key === 'stats') { collapseStats = !collapseStats; store.set('trh_collapse_stats', collapseStats); }
-        injectPanel();
-        return;
-      }
+      if (btn.id === 'trh-history-all') { showAllHistory = !showAllHistory; injectPanel(); return; }
 
       const id = btn.id;
 
@@ -1715,12 +1496,17 @@
       }
 
       if (id === 'trh-save-custom') {
-        customMults = {
-          high:      1.00,
-          secondary: readNumberInput('trh-c-secondary', 0.80),
-          tert1:     readNumberInput('trh-c-tert1', 0.60),
-          tert2:     readNumberInput('trh-c-tert2', 0.60),
-        };
+        // The user types the ratio as they know it (1.25 : 1 : 0.75 : 0.75);
+        // targets are relative to the 1st stat, so normalise to it.
+        const raw = readRatioInputs();
+        if (!raw) {
+          const sum = document.getElementById('trh-c-sum');
+          if (sum) sum.textContent = ratioSummaryText(ratioInputValues(), getRoles(highStat));
+          return;
+        }
+        customRaw = raw;
+        customMults = { high: 1.00, secondary: raw[1] / raw[0], tert1: raw[2] / raw[0], tert2: raw[3] / raw[0] };
+        store.set('trh_custom_raw', customRaw);
         store.set('trh_custom', customMults);
         selectedRatio = 'custom';
         store.set('trh_ratio', 'custom');
@@ -1781,17 +1567,62 @@
           })
           .catch(() => {
             btn.textContent = 'Manual copy below';
+            const pre = document.getElementById('trh-export-text');
+            if (pre) pre.hidden = false;
           })
           .finally(() => {
-            setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
+            setTimeout(() => { btn.textContent = 'Copy snapshot'; }, 2000);
           });
         return;
       }
 
     });
+
+    // Typing in a ratio field turns it into the Custom ratio (saved on click,
+    // so the panel isn't re-rendered under the user's cursor).
+    wrapper.addEventListener('input', (e) => {
+      if (!e.target.classList || !e.target.classList.contains('trh-ratio-input')) return;
+      const sum = document.getElementById('trh-c-sum');
+      if (sum) sum.textContent = ratioSummaryText(ratioInputValues(), getRoles(highStat));
+      wrapper.querySelectorAll('#trh-ratio-buttons [data-trh-ratio]').forEach(b =>
+        b.classList.toggle('active', b.dataset.trhRatio === 'custom'));
+      const row = document.getElementById('trh-save-row');
+      if (row) row.hidden = false;
+    });
+
+    // <details> toggle doesn't bubble, so listen in the capture phase.
+    wrapper.addEventListener('toggle', (e) => {
+      const sec = e.target && e.target.dataset && e.target.dataset.trhSec;
+      if (!sec) return;
+      if (e.target.open) openSections[sec] = true; else delete openSections[sec];
+      store.set('trh_open', openSections);
+    }, true);
+  }
+
+  function ratioInputValues() {
+    return ['high', 'secondary', 'tert1', 'tert2'].map(f => {
+      const el = document.getElementById('trh-c-' + f);
+      return el ? parseInputNumber(el.value, NaN) : NaN;
+    });
+  }
+
+  // The four ratio fields, or null unless 1st > 0 and every other value is
+  // between 0 and the 1st.
+  function readRatioInputs() {
+    const v = ratioInputValues();
+    if (v.some(n => !Number.isFinite(n) || n < 0)) return null;
+    if (!(v[0] > 0) || v.slice(1).some(n => n > v[0])) return null;
+    return v;
   }
 
   // Init
+
+  // Follow Torn's own light/dark switch live (it toggles body.dark-mode).
+  function syncTheme() {
+    const root = document.getElementById('trh-root');
+    if (root) root.classList.toggle('trh-dark', isTornDark());
+  }
+  if (document.body) new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
   // Active-viewing gate per Torn rule clarification 2026-05-13: scripts may
   // only read from / interact with pages the user is actively viewing
@@ -1832,7 +1663,7 @@
 
   function backgroundStatWatch() {
     if (!isGymPage() || !isActivelyViewed() || !document.getElementById('trh-wrapper')) return;
-    const warningVisible = document.querySelector('#trh-wrapper .trh-warn');
+    const warningVisible = document.querySelector('#trh-wrapper .trh-missing');
     if (!warningVisible) return;
     const stats = readStatsFromPage();
     if (Object.values(stats).some(v => v !== null)) {
