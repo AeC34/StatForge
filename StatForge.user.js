@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StatForge
 // @namespace    torn-ratio-helper
-// @version      2.0.0
+// @version      2.0.1
 // @description  Live ratio panel for Torn gym stats with rep-counter automation and per-stat gym switching. Reads your gym-gain perks (Steadfast, education, property, books) from the Torn API (requires your own API key) to weight training gains by your real multipliers and protect your special-gym access ratios. Inspired by ClasixTV's original Torn ratio helper. TornPDA users should set injection time to END.
 // @author       AeC3
 // @match        https://www.torn.com/*
@@ -202,6 +202,7 @@
     if (n === null || n === undefined || isNaN(n)) return '???';
     const r = Math.round(n);
     const abs = Math.abs(r);
+    if (abs >= 1e9) return (r / 1e9).toFixed(2) + 'B';
     if (abs >= 1e6) return (r / 1e6).toFixed(1) + 'M';
     if (abs >= 1e3) return Math.round(r / 1e3) + 'K';
     return String(r);
@@ -438,7 +439,8 @@
     #trh-root {
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
       font-size: 14px; line-height: 1.4; color: var(--sf-fg); background: var(--sf-bg);
-      border: 1px solid var(--sf-line); border-radius: 10px; margin: 14px 0; max-width: 600px;
+      border: 1px solid color-mix(in srgb, var(--sf-primary) 45%, var(--sf-line));
+      border-radius: 10px; margin: 10px 0; max-width: 600px;
       overflow: hidden; text-align: left;
     }
     #trh-root button {
@@ -454,7 +456,16 @@
     }
     #trh-title { font-weight: 600; font-size: 14px; }
     .trh-ctx { font-size: 12px; color: var(--sf-dim); text-align: right; }
-    #trh-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    #trh-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .trh-topline { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; }
+    .trh-topline #trh-title { font-size: 12px; }
+    .trh-verbrow { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .trh-need { font-size: 14px; color: var(--sf-dim); font-variant-numeric: tabular-nums; text-align: right; }
+    #trh-root .trh-go { margin-top: 0; min-height: 42px; padding: 9px 14px; }
+    #trh-root details.trh-more { border: 0; background: transparent; border-top: 1px solid var(--sf-line); border-radius: 0; margin: 0 -12px -10px; }
+    #trh-root details.trh-more > summary { min-height: 40px; padding: 0 12px; }
+    .trh-more-inner { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+    .trh-why { line-height: 1.45; }
 
     .trh-eyebrow { font-size: 12px; color: var(--sf-dim); }
     .trh-dim { color: var(--sf-dim); }
@@ -470,7 +481,7 @@
       border: 1px solid color-mix(in srgb, var(--sf-primary) 45%, var(--sf-line));
       display: flex; flex-direction: column; gap: 6px;
     }
-    .trh-verb { font-size: 24px; font-weight: 600; line-height: 1.2; display: flex; align-items: center; gap: 8px; }
+    .trh-verb { font-size: 20px; font-weight: 600; line-height: 1.2; display: flex; align-items: center; gap: 8px; }
     .trh-verb .trh-dot { width: 10px; height: 10px; }
     .trh-facts { font-size: 15px; line-height: 1.45; font-variant-numeric: tabular-nums; }
     .trh-marks { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1162,8 +1173,7 @@
     const marksHtml = marks.length ? `<div class="trh-marks">${marks.join('')}</div>` : '';
 
     if (!rec) {
-      return `<div class="trh-answer"><div class="trh-eyebrow">Train next</div>
-        <div class="trh-facts">No stat to recommend yet.</div>${marksHtml}</div>`;
+      return { top: `<div class="trh-facts">No stat to recommend yet.</div>${marksHtml}`, why: '' };
     }
 
     const cur = stats[rec] || 0;
@@ -1184,16 +1194,23 @@
       : bestGym.id !== activeId ? `Best gym: ${escapeHtml(gymName(bestGym.id))} (${bestGym.dots} dots)`
       : `You are at the best gym, ${escapeHtml(gymName(activeId))}`;
 
-    return `
-      <div class="trh-answer">
-        <div class="trh-eyebrow">Train next</div>
-        <div class="trh-verb">${statDot(rec)}${STAT_LABELS[rec]}</div>
-        <div class="trh-facts">${needText} <span class="trh-dim">· ${fmtShort(cur)} of ${fmtShort(tgt)}</span></div>
-        <div class="trh-facts trh-dim">${reason}. ${gymLine}.</div>
+    return {
+      top: `
+        <div class="trh-verbrow">
+          <span class="trh-verb">${statDot(rec)}${STAT_LABELS[rec]}</span>
+          <span class="trh-need" title="${fmtNum(cur)} of ${fmtNum(tgt)}">${needText}</span>
+        </div>
         ${marksHtml}
-        <button class="trh-go" id="trh-train-now" data-trh-stat="${rec}">${nextTrainLabel(rec, stats)}</button>
-        <div class="trh-prov"><span>Each click is one action</span><span>Read from this page</span></div>
-      </div>`;
+        <button class="trh-go" id="trh-train-now" data-trh-stat="${rec}">${nextTrainLabel(rec, stats)}</button>`,
+      why: `<div class="trh-sub trh-why">${reason}. ${gymLine}. ${fmtShort(cur)} of ${fmtShort(tgt)}.</div>`,
+    };
+  }
+
+  // One-line summary for the closed "More" row: grade · total · energy.
+  function keySummary(stats, targets, roles) {
+    const grade = overallGrade(stats, targets, roles, selectedRatio);
+    const energy = readPageEnergy();
+    return `${grade.letter} · ${fmtShort(tbsOf(stats))}${energy ? ` · E ${energy.current}/${energy.max}` : ''}`;
   }
 
   function renderKeyStats(stats, targets, roles) {
@@ -1398,20 +1415,31 @@
   function render(stats) {
     const roles   = getRoles(highStat);
     const targets = computeTargets(stats, selectedRatio, highStat);
-    return `
-      <div id="trh-root" class="${isTornDark() ? 'trh-dark' : ''}">
-        <div id="trh-header">
-          <div id="trh-title">StatForge</div>
-          <div class="trh-ctx">${RATIOS[selectedRatio].short} · ${STAT_LABELS[highStat]} high</div>
-        </div>
-        <div id="trh-body">
-          ${renderAnswer(stats, targets, roles)}
+    // Minimal: only Train Next + its button are always visible; everything
+    // else sits behind one "More" row whose summary carries the key numbers.
+    const answer = renderAnswer(stats, targets, roles);
+    const more = `
+      <details data-trh-sec="more" class="trh-more"${openSections.more ? ' open' : ''}>
+        <summary><span class="trh-st">More</span><span class="trh-sm">${keySummary(stats, targets, roles)}</span></summary>
+        <div class="trh-more-inner">
+          ${answer.why}
           ${renderKeyStats(stats, targets, roles)}
           ${renderHeadroom(stats, roles)}
           ${renderStats(stats, targets, roles)}
           ${renderHistorySection(stats, targets, roles)}
           ${renderSettingsSection(roles)}
           ${renderHowItWorks()}
+        </div>
+      </details>`;
+    return `
+      <div id="trh-root" class="${isTornDark() ? 'trh-dark' : ''}">
+        <div id="trh-body">
+          <div class="trh-topline">
+            <span id="trh-title">StatForge <span class="trh-dim">· Train next</span></span>
+            <span class="trh-ctx">${RATIOS[selectedRatio].short} · ${STAT_LABELS[highStat]} high</span>
+          </div>
+          ${answer.top}
+          ${more}
         </div>
       </div>`;
   }
